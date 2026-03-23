@@ -1,0 +1,28 @@
+# ESP-IDF build outputs
+build/
+
+# CMake / Ninja artifacts
+CMakeFiles/
+CMakeCache.txt
+cmake_install.cmake
+compile_commands.json
+
+# ESP-IDF generated / temporary
+sdkconfig.old
+flasher_args.json
+flash_args
+
+# Python / tooling caches
+__pycache__/
+*.pyc
+.pytest_cache/
+
+# OS / editor noise
+.DS_Store
+Thumbs.db
+*.swp
+*.swo
+
+# Local IDE metadata
+.cursor/
+.vscode/
