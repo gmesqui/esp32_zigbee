@@ -4,6 +4,7 @@
 #include <stdint.h>
 #include <string.h>
 
+#include "esp_err.h"
 #include "esp_log.h"
 #include "esp_zigbee_core.h"
 #include "platform/esp_zigbee_platform.h"
@@ -19,6 +20,10 @@
 #include "zcl/esp_zigbee_zcl_temperature_meas.h"
 #include "zcl/esp_zigbee_zcl_humidity_meas.h"
 #include "zcl/esp_zigbee_zcl_occupancy_sensing.h"
+#include "zcl/esp_zigbee_zcl_illuminance_meas.h"
+#include "zcl/esp_zigbee_zcl_pressure_meas.h"
+#include "zcl/esp_zigbee_zcl_power_config.h"
+#include "zcl/esp_zigbee_zcl_ias_zone.h"
 #include "zdo/esp_zigbee_zdo_command.h"
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
@@ -44,6 +49,8 @@ static void emit_event(const char *name);
 #define ABSENT_TIMEOUT_S 420.0
 #define REINTERVIEW_PERIOD_S 300.0
 #define HEALTH_POLL_PERIOD_MS 2000
+/** Sondeo Read Attribute sobre sensores conocidos (solo aire, sin NVS). */
+#define SENSOR_POLL_PERIOD_MS 60000
 
 typedef struct {
     bool used;
@@ -94,6 +101,7 @@ typedef struct {
 } ieee_resolve_job_t;
 
 static ieee_resolve_job_t s_ieee_resolve[IEEE_RESOLVE_MAX];
+static TickType_t s_next_sensor_poll_tick = 0;
 static uint16_t s_pending_interview[PENDING_INTERVIEW_MAX];
 static size_t s_pending_interview_n;
 
@@ -356,6 +364,128 @@ static void attr_to_text(const uint8_t *value, uint16_t value_size, char *out, s
     out[copy_n] = '\0';
 }
 
+/** Interpreta atributo ZCL y actualiza lecturas en la tabla (informes y Read RSP). @return true si la lectura almacenada cambio. */
+static bool zcl_apply_attribute_to_readings(uint16_t short_addr, uint8_t ep, uint16_t cluster_id, const esp_zb_zcl_attribute_t *attr)
+{
+    if (attr == NULL || attr->data.value == NULL || attr->data.size == 0U) {
+        return false;
+    }
+    const void *pv = attr->data.value;
+    const esp_zb_zcl_attr_type_t ty = attr->data.type;
+
+    if (cluster_id == ESP_ZB_ZCL_CLUSTER_ID_TEMP_MEASUREMENT && attr->id == ESP_ZB_ZCL_ATTR_TEMP_MEASUREMENT_VALUE_ID) {
+        if (attr->data.size >= 2U && (ty == ESP_ZB_ZCL_ATTR_TYPE_S16 || ty == ESP_ZB_ZCL_ATTR_TYPE_U16)) {
+            int16_t raw;
+            memcpy(&raw, pv, sizeof(raw));
+            if (device_table_note_reading_temperature(short_addr, ep, raw)) {
+                ESP_LOGI(TAG, "[T+%07.3f] Valor temp short=0x%04X ep=%u -> %.2f C", timebase_now_s(), short_addr, ep, raw / 100.0);
+                return true;
+            }
+        }
+        return false;
+    }
+    if (cluster_id == ESP_ZB_ZCL_CLUSTER_ID_REL_HUMIDITY_MEASUREMENT && attr->id == ESP_ZB_ZCL_ATTR_REL_HUMIDITY_MEASUREMENT_VALUE_ID) {
+        if (attr->data.size >= 2U && (ty == ESP_ZB_ZCL_ATTR_TYPE_U16 || ty == ESP_ZB_ZCL_ATTR_TYPE_S16)) {
+            uint16_t raw;
+            memcpy(&raw, pv, sizeof(raw));
+            if (device_table_note_reading_humidity(short_addr, ep, raw)) {
+                ESP_LOGI(TAG, "[T+%07.3f] Valor humedad short=0x%04X ep=%u -> %.2f %%", timebase_now_s(), short_addr, ep, raw / 100.0);
+                return true;
+            }
+        }
+        return false;
+    }
+    if (cluster_id == ESP_ZB_ZCL_CLUSTER_ID_ON_OFF && attr->id == ESP_ZB_ZCL_ATTR_ON_OFF_ON_OFF_ID) {
+        if (ty == ESP_ZB_ZCL_ATTR_TYPE_BOOL && attr->data.size >= 1U) {
+            const uint8_t b = *(const uint8_t *)pv;
+            if (device_table_note_reading_on_off(short_addr, ep, b != 0U)) {
+                ESP_LOGI(TAG, "[T+%07.3f] Valor on_off short=0x%04X ep=%u -> %s", timebase_now_s(), short_addr, ep, b ? "ON" : "OFF");
+                return true;
+            }
+            return false;
+        }
+        if (ty == ESP_ZB_ZCL_ATTR_TYPE_U8 && attr->data.size >= 1U) {
+            const uint8_t b = *(const uint8_t *)pv;
+            if (device_table_note_reading_on_off(short_addr, ep, b != 0U)) {
+                ESP_LOGI(TAG, "[T+%07.3f] Valor on_off short=0x%04X ep=%u -> %s", timebase_now_s(), short_addr, ep, b ? "ON" : "OFF");
+                return true;
+            }
+        }
+        return false;
+    }
+    if (cluster_id == ESP_ZB_ZCL_CLUSTER_ID_OCCUPANCY_SENSING && attr->id == ESP_ZB_ZCL_ATTR_OCCUPANCY_SENSING_OCCUPANCY_ID) {
+        if ((ty == ESP_ZB_ZCL_ATTR_TYPE_U8 || ty == ESP_ZB_ZCL_ATTR_TYPE_8BITMAP) && attr->data.size >= 1U) {
+            const uint8_t occ = *(const uint8_t *)pv;
+            if (device_table_note_reading_occupancy(short_addr, ep, occ)) {
+                ESP_LOGI(TAG, "[T+%07.3f] Valor ocupacion short=0x%04X ep=%u bitmap=0x%02X ocupado=%s", timebase_now_s(), short_addr, ep, occ,
+                         (occ & 1U) ? "si" : "no");
+                return true;
+            }
+        }
+        return false;
+    }
+    if (cluster_id == ESP_ZB_ZCL_CLUSTER_ID_ILLUMINANCE_MEASUREMENT &&
+        attr->id == ESP_ZB_ZCL_ATTR_ILLUMINANCE_MEASUREMENT_MEASURED_VALUE_ID) {
+        if (attr->data.size >= 2U && (ty == ESP_ZB_ZCL_ATTR_TYPE_U16 || ty == ESP_ZB_ZCL_ATTR_TYPE_S16)) {
+            uint16_t raw;
+            memcpy(&raw, pv, sizeof(raw));
+            if (device_table_note_reading_illuminance(short_addr, ep, raw)) {
+                ESP_LOGI(TAG, "[T+%07.3f] Valor iluminancia short=0x%04X ep=%u measured_value=%u", timebase_now_s(), short_addr, ep,
+                         (unsigned)raw);
+                return true;
+            }
+        }
+        return false;
+    }
+    if (cluster_id == ESP_ZB_ZCL_CLUSTER_ID_PRESSURE_MEASUREMENT && attr->id == ESP_ZB_ZCL_ATTR_PRESSURE_MEASUREMENT_VALUE_ID) {
+        if (attr->data.size >= 2U && (ty == ESP_ZB_ZCL_ATTR_TYPE_S16 || ty == ESP_ZB_ZCL_ATTR_TYPE_U16)) {
+            int16_t raw;
+            memcpy(&raw, pv, sizeof(raw));
+            if (device_table_note_reading_pressure(short_addr, ep, raw)) {
+                ESP_LOGI(TAG, "[T+%07.3f] Valor presion short=0x%04X ep=%u raw_0_1_kpa=%d (%.2f kPa)", timebase_now_s(), short_addr, ep, (int)raw,
+                         (double)raw / 10.0);
+                return true;
+            }
+        }
+        return false;
+    }
+    if (cluster_id == ESP_ZB_ZCL_CLUSTER_ID_POWER_CONFIG) {
+        if (attr->id == ESP_ZB_ZCL_ATTR_POWER_CONFIG_BATTERY_VOLTAGE_ID) {
+            if (ty == ESP_ZB_ZCL_ATTR_TYPE_U8 && attr->data.size >= 1U) {
+                const uint8_t v = *(const uint8_t *)pv;
+                if (device_table_note_reading_battery_voltage(short_addr, ep, v)) {
+                    ESP_LOGI(TAG, "[T+%07.3f] Bateria (voltaje) short=0x%04X ep=%u raw_100mV=%u -> %u mV", timebase_now_s(), short_addr, ep,
+                             (unsigned)v, (unsigned)v * 100U);
+                    return true;
+                }
+            }
+            return false;
+        }
+        if (attr->id == ESP_ZB_ZCL_ATTR_POWER_CONFIG_BATTERY_PERCENTAGE_REMAINING_ID) {
+            if (ty == ESP_ZB_ZCL_ATTR_TYPE_U8 && attr->data.size >= 1U) {
+                const uint8_t p = *(const uint8_t *)pv;
+                if (device_table_note_reading_battery_pct(short_addr, ep, p)) {
+                    ESP_LOGI(TAG, "[T+%07.3f] Bateria (%%) short=0x%04X ep=%u raw_medios_puntos=%u -> ~%u %%", timebase_now_s(), short_addr, ep,
+                             (unsigned)p, (unsigned)(p / 2U));
+                    return true;
+                }
+            }
+            return false;
+        }
+    }
+    if (cluster_id == ESP_ZB_ZCL_CLUSTER_ID_IAS_ZONE && attr->id == ESP_ZB_ZCL_ATTR_IAS_ZONE_ZONESTATUS_ID) {
+        if (attr->data.size >= 2U && (ty == ESP_ZB_ZCL_ATTR_TYPE_U16 || ty == ESP_ZB_ZCL_ATTR_TYPE_16BITMAP)) {
+            uint16_t zs;
+            memcpy(&zs, pv, sizeof(zs));
+            if (device_table_note_reading_ias_zone_status(short_addr, ep, zs)) {
+                ESP_LOGI(TAG, "[T+%07.3f] IAS ZoneStatus short=0x%04X ep=%u status=0x%04X", timebase_now_s(), short_addr, ep, (unsigned)zs);
+                return true;
+            }
+        }
+    }
+    return false;
+}
+
 static void zcl_read_attr_req(uint16_t dst_short, uint8_t dst_ep, uint16_t cluster_id, uint16_t attr_id)
 {
     uint16_t attr_field[] = {attr_id};
@@ -373,6 +503,11 @@ static void zcl_read_attr_req(uint16_t dst_short, uint8_t dst_ep, uint16_t clust
     req_track_sent(false, dst_short, tsn);
     ESP_LOGI(TAG, "[T+%07.3f] ReadAttr REQ short=0x%04X ep=%u cl=0x%04X attr=0x%04X tsn=0x%02X", timebase_now_s(), dst_short, dst_ep,
              cluster_id, attr_id, tsn);
+}
+
+static void sensor_poll_issue_read(uint16_t short_addr, uint8_t ep, uint16_t cluster_id, uint16_t attr_id)
+{
+    zcl_read_attr_req(short_addr, ep, cluster_id, attr_id);
 }
 
 static void zcl_config_report_req(uint16_t dst_short, uint8_t dst_ep, uint16_t cluster_id, uint16_t attr_id, uint8_t attr_type, uint16_t min_s,
@@ -533,6 +668,46 @@ static void simple_desc_cb(esp_zb_zdp_status_t zdo_status, esp_zb_af_simple_desc
                  "[T+%07.3f] Switch/actuador detectado short=0x%04X ep=%u (comandos: ON=0x%02X OFF=0x%02X TOGGLE=0x%02X)",
                  timebase_now_s(), short_addr, simple_desc->endpoint, ESP_ZB_ZCL_CMD_ON_OFF_ON_ID, ESP_ZB_ZCL_CMD_ON_OFF_OFF_ID,
                  ESP_ZB_ZCL_CMD_ON_OFF_TOGGLE_ID);
+    }
+    if (has_cluster(clusters_in, in_len, ESP_ZB_ZCL_CLUSTER_ID_ILLUMINANCE_MEASUREMENT)) {
+        static const uint16_t ill_delta = 1000U;
+        zcl_read_attr_req(short_addr, simple_desc->endpoint, ESP_ZB_ZCL_CLUSTER_ID_ILLUMINANCE_MEASUREMENT,
+                          ESP_ZB_ZCL_ATTR_ILLUMINANCE_MEASUREMENT_MEASURED_VALUE_ID);
+        zcl_config_report_req(short_addr, simple_desc->endpoint, ESP_ZB_ZCL_CLUSTER_ID_ILLUMINANCE_MEASUREMENT,
+                              ESP_ZB_ZCL_ATTR_ILLUMINANCE_MEASUREMENT_MEASURED_VALUE_ID, ESP_ZB_ZCL_ATTR_TYPE_U16, 30, 300, &ill_delta);
+        emit_event("INTERVIEW_CONFIG");
+        ESP_LOGI(TAG, "[T+%07.3f] Sensor iluminancia short=0x%04X ep=%u", timebase_now_s(), short_addr, simple_desc->endpoint);
+    }
+    if (has_cluster(clusters_in, in_len, ESP_ZB_ZCL_CLUSTER_ID_PRESSURE_MEASUREMENT)) {
+        static const int16_t pres_delta = 10;
+        zcl_read_attr_req(short_addr, simple_desc->endpoint, ESP_ZB_ZCL_CLUSTER_ID_PRESSURE_MEASUREMENT,
+                          ESP_ZB_ZCL_ATTR_PRESSURE_MEASUREMENT_VALUE_ID);
+        zcl_config_report_req(short_addr, simple_desc->endpoint, ESP_ZB_ZCL_CLUSTER_ID_PRESSURE_MEASUREMENT,
+                              ESP_ZB_ZCL_ATTR_PRESSURE_MEASUREMENT_VALUE_ID, ESP_ZB_ZCL_ATTR_TYPE_S16, 30, 300, &pres_delta);
+        emit_event("INTERVIEW_CONFIG");
+        ESP_LOGI(TAG, "[T+%07.3f] Sensor presion short=0x%04X ep=%u", timebase_now_s(), short_addr, simple_desc->endpoint);
+    }
+    if (has_cluster(clusters_in, in_len, ESP_ZB_ZCL_CLUSTER_ID_POWER_CONFIG)) {
+        static const uint8_t v_delta = 1U;
+        static const uint8_t pct_delta = 2U;
+        zcl_read_attr_req(short_addr, simple_desc->endpoint, ESP_ZB_ZCL_CLUSTER_ID_POWER_CONFIG,
+                          ESP_ZB_ZCL_ATTR_POWER_CONFIG_BATTERY_VOLTAGE_ID);
+        zcl_read_attr_req(short_addr, simple_desc->endpoint, ESP_ZB_ZCL_CLUSTER_ID_POWER_CONFIG,
+                          ESP_ZB_ZCL_ATTR_POWER_CONFIG_BATTERY_PERCENTAGE_REMAINING_ID);
+        zcl_config_report_req(short_addr, simple_desc->endpoint, ESP_ZB_ZCL_CLUSTER_ID_POWER_CONFIG,
+                              ESP_ZB_ZCL_ATTR_POWER_CONFIG_BATTERY_VOLTAGE_ID, ESP_ZB_ZCL_ATTR_TYPE_U8, 60, 3600, &v_delta);
+        zcl_config_report_req(short_addr, simple_desc->endpoint, ESP_ZB_ZCL_CLUSTER_ID_POWER_CONFIG,
+                              ESP_ZB_ZCL_ATTR_POWER_CONFIG_BATTERY_PERCENTAGE_REMAINING_ID, ESP_ZB_ZCL_ATTR_TYPE_U8, 60, 3600, &pct_delta);
+        emit_event("INTERVIEW_CONFIG");
+        ESP_LOGI(TAG, "[T+%07.3f] Power Config (bateria) short=0x%04X ep=%u", timebase_now_s(), short_addr, simple_desc->endpoint);
+    }
+    if (has_cluster(clusters_in, in_len, ESP_ZB_ZCL_CLUSTER_ID_IAS_ZONE)) {
+        static const uint16_t zs_delta = 1U;
+        zcl_read_attr_req(short_addr, simple_desc->endpoint, ESP_ZB_ZCL_CLUSTER_ID_IAS_ZONE, ESP_ZB_ZCL_ATTR_IAS_ZONE_ZONESTATUS_ID);
+        zcl_config_report_req(short_addr, simple_desc->endpoint, ESP_ZB_ZCL_CLUSTER_ID_IAS_ZONE, ESP_ZB_ZCL_ATTR_IAS_ZONE_ZONESTATUS_ID,
+                              ESP_ZB_ZCL_ATTR_TYPE_16BITMAP, 10, 300, &zs_delta);
+        emit_event("INTERVIEW_CONFIG");
+        ESP_LOGI(TAG, "[T+%07.3f] IAS Zone short=0x%04X ep=%u", timebase_now_s(), short_addr, simple_desc->endpoint);
     }
 }
 
@@ -766,6 +941,41 @@ static void refresh_runtime_from_stack(void)
     esp_zb_get_extended_pan_id(s_runtime.ext_pan_id);
 }
 
+/** RSSI/LQI del ultimo paquete no vienen en esp_zb_zcl_report_attr_message_t; se toman de la tabla de vecinos NWK. */
+static bool neighbor_table_lookup_link(uint16_t short_addr, int8_t *rssi_out, uint8_t *lqi_out)
+{
+    if (short_addr == 0x0000U || short_addr == 0xFFFFU || rssi_out == NULL || lqi_out == NULL) {
+        return false;
+    }
+    esp_zb_nwk_info_iterator_t it = ESP_ZB_NWK_INFO_ITERATOR_INIT;
+    esp_zb_nwk_neighbor_info_t nbr;
+    for (;;) {
+        const esp_err_t err = esp_zb_nwk_get_next_neighbor(&it, &nbr);
+        if (err != ESP_OK) {
+            break;
+        }
+        if (nbr.short_addr == short_addr) {
+            *rssi_out = nbr.rssi;
+            *lqi_out = nbr.lqi;
+            return true;
+        }
+    }
+    return false;
+}
+
+static void trace_meta_fill_neighbor_link(zb_trace_meta_t *meta)
+{
+    if (meta == NULL) {
+        return;
+    }
+    int8_t r = 0;
+    uint8_t l = 0;
+    if (neighbor_table_lookup_link(meta->src_short, &r, &l)) {
+        meta->rssi = r;
+        meta->lqi = l;
+    }
+}
+
 static esp_err_t zb_action_handler(esp_zb_core_action_callback_id_t callback_id, const void *message)
 {
     if (message == NULL) {
@@ -786,6 +996,7 @@ static esp_err_t zb_action_handler(esp_zb_core_action_callback_id_t callback_id,
             .rssi = 0,
             .lqi = 0,
         };
+        trace_meta_fill_neighbor_link(&meta);
 
         uint8_t payload[16] = {0};
         size_t n = 0;
@@ -802,8 +1013,17 @@ static esp_err_t zb_action_handler(esp_zb_core_action_callback_id_t callback_id,
         if (!device_table_has_short_addr(meta.src_short)) {
             ieee_resolve_schedule(meta.src_short);
         }
-        emit_event("DEVICE_REPORT");
-        device_table_inc_counter("read_rsp_ok");
+        bool reading_changed = false;
+        if (m->status == ESP_ZB_ZCL_STATUS_SUCCESS) {
+            reading_changed = zcl_apply_attribute_to_readings(meta.src_short, m->src_endpoint, m->cluster, &m->attribute);
+            device_table_inc_counter("report_attr_ok");
+            if (!reading_changed) {
+                device_table_inc_counter("report_attr_unchanged");
+            }
+        }
+        if (reading_changed) {
+            emit_event("DEVICE_REPORT");
+        }
         return ESP_OK;
     }
 
@@ -821,6 +1041,16 @@ static esp_err_t zb_action_handler(esp_zb_core_action_callback_id_t callback_id,
             .rssi = m->info.header.rssi,
             .lqi = 0,
         };
+        {
+            int8_t nr = 0;
+            uint8_t nl = 0;
+            if (neighbor_table_lookup_link(meta.src_short, &nr, &nl)) {
+                meta.lqi = nl;
+                if (meta.rssi == 0) {
+                    meta.rssi = nr;
+                }
+            }
+        }
         const uint8_t payload[] = {m->info.header.fc, m->info.header.tsn, m->resp_to_cmd, (uint8_t)m->status_code};
         (void)zb_trace_log_packet(ZB_DIR_RX, &meta, payload, sizeof(payload));
         device_table_update_from_trace(&meta);
@@ -832,6 +1062,19 @@ static esp_err_t zb_action_handler(esp_zb_core_action_callback_id_t callback_id,
         const uint16_t short_addr =
             (m->info.src_address.addr_type == ESP_ZB_ZCL_ADDR_TYPE_SHORT) ? m->info.src_address.u.short_addr : 0xFFFF;
         zb_coordinator_note_inbound_device_traffic(short_addr);
+        {
+            int8_t r = m->info.header.rssi;
+            uint8_t l = 0;
+            int8_t nr = 0;
+            uint8_t nl = 0;
+            if (neighbor_table_lookup_link(short_addr, &nr, &nl)) {
+                l = nl;
+                if (r == 0) {
+                    r = nr;
+                }
+            }
+            device_table_update_rf_metrics(short_addr, r, l);
+        }
         req_track_ack(false, short_addr, m->info.header.tsn);
         identity_job_t *job = identity_job_find(short_addr, m->info.src_endpoint);
         char manufacturer[DEVICE_TABLE_MAX_STR] = {0};
@@ -842,6 +1085,7 @@ static esp_err_t zb_action_handler(esp_zb_core_action_callback_id_t callback_id,
                 continue;
             }
             device_table_inc_counter("read_rsp_ok");
+            zcl_apply_attribute_to_readings(short_addr, m->info.src_endpoint, m->info.cluster, &v->attribute);
             if (m->info.cluster == ESP_ZB_ZCL_CLUSTER_ID_BASIC &&
                 v->attribute.id == ESP_ZB_ZCL_ATTR_BASIC_MANUFACTURER_NAME_ID &&
                 v->attribute.data.type == ESP_ZB_ZCL_ATTR_TYPE_CHAR_STRING) {
@@ -952,6 +1196,19 @@ esp_err_t zb_coordinator_poll(void)
     ieee_resolve_poll();
     health_and_interview_poll();
     refresh_runtime_from_stack();
+
+    if (esp_zb_bdb_dev_joined()) {
+        const TickType_t now_poll = xTaskGetTickCount();
+        if (s_next_sensor_poll_tick == 0) {
+            s_next_sensor_poll_tick = now_poll + pdMS_TO_TICKS(SENSOR_POLL_PERIOD_MS);
+        } else if ((int32_t)(now_poll - s_next_sensor_poll_tick) >= 0) {
+            s_next_sensor_poll_tick = now_poll + pdMS_TO_TICKS(SENSOR_POLL_PERIOD_MS);
+            device_table_request_sensor_poll_reads(sensor_poll_issue_read);
+        }
+    } else {
+        s_next_sensor_poll_tick = 0;
+    }
+
     esp_zb_lock_release();
     return ESP_OK;
 }

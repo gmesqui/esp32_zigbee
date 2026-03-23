@@ -56,6 +56,28 @@ typedef struct {
     uint8_t battery_pct;
     device_norm_t norm_type;
     char norm_name[DEVICE_TABLE_MAX_TYPE_STR];
+    /** Ultimas lecturas ZCL (informes o Read Attributes); no disparan NVS por defecto. */
+    bool has_temperature;
+    bool has_humidity;
+    bool has_on_off;
+    bool has_occupancy;
+    bool has_illuminance;
+    bool has_pressure;
+    bool has_ias_zone_status;
+    /** Ultimo valor desde cluster Power Config (0x0001); no implica otras fuentes de bateria. */
+    bool has_power_battery_voltage;
+    bool has_power_battery_pct;
+    int16_t temperature_0_01_c;
+    uint16_t humidity_0_01_pct;
+    bool on_off;
+    uint8_t occupancy_bitmap;
+    /** Raw ZCL Illuminance MeasuredValue (log encoding); 0xFFFF no se guarda. */
+    uint16_t illuminance_measured_value;
+    /** Raw ZCL Pressure MeasuredValue en decimas de kPa (0,1 kPa por unidad). */
+    int16_t pressure_0_1_kpa;
+    uint16_t ias_zone_status;
+    uint8_t readings_src_endpoint;
+    double readings_last_update_s;
 } device_record_t;
 
 typedef struct {
@@ -67,6 +89,10 @@ typedef struct {
     uint32_t read_req;
     uint32_t read_rsp_ok;
     uint32_t read_rsp_fail;
+    /** Informes ZCL Report Attributes recibidos con status OK (incluye valor repetido). */
+    uint32_t report_attr_ok;
+    /** Subconjunto de report_attr_ok sin cambio semantico en la tabla de lecturas. */
+    uint32_t report_attr_unchanged;
     uint32_t report_cfg_req;
     uint32_t report_cfg_rsp_ok;
     uint32_t report_cfg_rsp_fail;
@@ -99,6 +125,8 @@ void device_table_init(void);
 void device_table_touch(uint64_t ieee, uint16_t short_addr, int8_t rssi, uint8_t lqi);
 void device_table_update_discovery(uint64_t ieee, uint16_t short_addr, uint16_t device_id, const char *manufacturer, const char *model);
 void device_table_update_from_trace(const zb_trace_meta_t *meta);
+/** Actualiza solo rssi/lqi y last_seen si el dispositivo existe (sin NVS ni note_inbound). */
+void device_table_update_rf_metrics(uint16_t short_addr, int8_t rssi, uint8_t lqi);
 void device_table_update_identity(uint16_t short_addr, const char *manufacturer, const char *model);
 void device_table_update_node_desc(uint16_t short_addr, uint16_t manufacturer_code, uint8_t mac_capability_flags);
 void device_table_update_simple_desc(uint16_t short_addr, uint8_t endpoint, uint16_t device_id, const uint16_t *clusters_in,
@@ -114,6 +142,21 @@ void device_table_get_telemetry(device_table_telemetry_t *out);
 void device_table_get_network_summary(device_table_network_summary_t *out);
 size_t device_table_get_known_short_addrs(uint16_t *out, size_t max_out);
 bool device_table_has_short_addr(uint16_t short_addr);
+/** @return true si el valor de lectura cambio (o es la primera vez); false si sin cambio o entrada invalida. */
+bool device_table_note_reading_temperature(uint16_t short_addr, uint8_t ep, int16_t value_0_01_c);
+bool device_table_note_reading_humidity(uint16_t short_addr, uint8_t ep, uint16_t value_0_01_pct);
+bool device_table_note_reading_on_off(uint16_t short_addr, uint8_t ep, bool on);
+bool device_table_note_reading_occupancy(uint16_t short_addr, uint8_t ep, uint8_t occupancy_bitmap);
+bool device_table_note_reading_illuminance(uint16_t short_addr, uint8_t ep, uint16_t measured_value_raw);
+bool device_table_note_reading_pressure(uint16_t short_addr, uint8_t ep, int16_t measured_value_0_1_kpa);
+bool device_table_note_reading_ias_zone_status(uint16_t short_addr, uint8_t ep, uint16_t zone_status);
+bool device_table_note_reading_battery_voltage(uint16_t short_addr, uint8_t ep, uint8_t voltage_100mv_units);
+bool device_table_note_reading_battery_pct(uint16_t short_addr, uint8_t ep, uint8_t percentage_remaining_half_pct);
+
+typedef void (*device_table_zcl_read_req_fn_t)(uint16_t short_addr, uint8_t ep, uint16_t cluster_id, uint16_t attr_id);
+/** Solicita lecturas ZCL para sensores conocidos (clusters_in + endpoints); el callback debe enviar Read Attribute. */
+void device_table_request_sensor_poll_reads(device_table_zcl_read_req_fn_t fn);
+
 /** Escribe la cache en NVS solo si hubo cambios desde el ultimo guardado (no usar para wear continuo). */
 void device_table_persist_cache(void);
 void device_table_dump_json(void);

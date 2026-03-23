@@ -1,6 +1,7 @@
 #include "device_table.h"
 
 #include <inttypes.h>
+#include <math.h>
 #include <stdio.h>
 #include <string.h>
 
@@ -17,7 +18,7 @@ static const char *CACHE_NS = "zb_cache";
 /** Blob monolítico legado (puede fallar por tamaño/fragmentación en NVS pequeño). */
 static const char *CACHE_KEY_LEGACY = "devtab_v2";
 #define DEVICE_TABLE_MAX_ROUTE_SUMMARY 32
-#define CACHE_VER 2U
+#define CACHE_VER 5U
 /** Dispositivos por clave NVS (blobs más pequeños = menos fallos en partición ~24 KiB). */
 #define CACHE_CHUNK_SLOTS 8
 #define CACHE_NUM_CHUNKS (DEVICE_TABLE_MAX_DEVICES / CACHE_CHUNK_SLOTS)
@@ -363,6 +364,17 @@ void device_table_update_from_trace(const zb_trace_meta_t *meta)
     rec->last_seen_s = timebase_now_s();
 }
 
+void device_table_update_rf_metrics(uint16_t short_addr, int8_t rssi, uint8_t lqi)
+{
+    device_record_t *rec = find_by_short(short_addr);
+    if (rec == NULL) {
+        return;
+    }
+    rec->rssi = rssi;
+    rec->lqi = lqi;
+    rec->last_seen_s = timebase_now_s();
+}
+
 void device_table_update_identity(uint16_t short_addr, const char *manufacturer, const char *model)
 {
     device_record_t *rec = find_by_short(short_addr);
@@ -531,6 +543,10 @@ void device_table_inc_counter(const char *counter_name)
         s_telemetry.read_rsp_ok++;
     } else if (strcmp(counter_name, "read_rsp_fail") == 0) {
         s_telemetry.read_rsp_fail++;
+    } else if (strcmp(counter_name, "report_attr_ok") == 0) {
+        s_telemetry.report_attr_ok++;
+    } else if (strcmp(counter_name, "report_attr_unchanged") == 0) {
+        s_telemetry.report_attr_unchanged++;
     } else if (strcmp(counter_name, "report_cfg_req") == 0) {
         s_telemetry.report_cfg_req++;
     } else if (strcmp(counter_name, "report_cfg_rsp_ok") == 0) {
@@ -606,6 +622,239 @@ size_t device_table_get_known_short_addrs(uint16_t *out, size_t max_out)
 bool device_table_has_short_addr(uint16_t short_addr)
 {
     return (find_by_short(short_addr) != NULL);
+}
+
+static void readings_touch(device_record_t *rec, uint8_t ep)
+{
+    rec->readings_src_endpoint = ep;
+    rec->readings_last_update_s = timebase_now_s();
+}
+
+bool device_table_note_reading_temperature(uint16_t short_addr, uint8_t ep, int16_t value_0_01_c)
+{
+    device_record_t *rec = find_by_short(short_addr);
+    if (rec == NULL) {
+        return false;
+    }
+    if (value_0_01_c == (int16_t)0x8000) {
+        return false;
+    }
+    if (rec->has_temperature && rec->temperature_0_01_c == value_0_01_c) {
+        return false;
+    }
+    rec->has_temperature = true;
+    rec->temperature_0_01_c = value_0_01_c;
+    readings_touch(rec, ep);
+    return true;
+}
+
+bool device_table_note_reading_humidity(uint16_t short_addr, uint8_t ep, uint16_t value_0_01_pct)
+{
+    device_record_t *rec = find_by_short(short_addr);
+    if (rec == NULL) {
+        return false;
+    }
+    if (value_0_01_pct == 0xFFFFU) {
+        return false;
+    }
+    if (rec->has_humidity && rec->humidity_0_01_pct == value_0_01_pct) {
+        return false;
+    }
+    rec->has_humidity = true;
+    rec->humidity_0_01_pct = value_0_01_pct;
+    readings_touch(rec, ep);
+    return true;
+}
+
+bool device_table_note_reading_on_off(uint16_t short_addr, uint8_t ep, bool on)
+{
+    device_record_t *rec = find_by_short(short_addr);
+    if (rec == NULL) {
+        return false;
+    }
+    if (rec->has_on_off && rec->on_off == on) {
+        return false;
+    }
+    rec->has_on_off = true;
+    rec->on_off = on;
+    readings_touch(rec, ep);
+    return true;
+}
+
+bool device_table_note_reading_occupancy(uint16_t short_addr, uint8_t ep, uint8_t occupancy_bitmap)
+{
+    device_record_t *rec = find_by_short(short_addr);
+    if (rec == NULL) {
+        return false;
+    }
+    if (rec->has_occupancy && rec->occupancy_bitmap == occupancy_bitmap) {
+        return false;
+    }
+    rec->has_occupancy = true;
+    rec->occupancy_bitmap = occupancy_bitmap;
+    readings_touch(rec, ep);
+    return true;
+}
+
+bool device_table_note_reading_illuminance(uint16_t short_addr, uint8_t ep, uint16_t measured_value_raw)
+{
+    device_record_t *rec = find_by_short(short_addr);
+    if (rec == NULL) {
+        return false;
+    }
+    if (measured_value_raw == 0xFFFFU) {
+        return false;
+    }
+    if (rec->has_illuminance && rec->illuminance_measured_value == measured_value_raw) {
+        return false;
+    }
+    rec->has_illuminance = true;
+    rec->illuminance_measured_value = measured_value_raw;
+    readings_touch(rec, ep);
+    return true;
+}
+
+bool device_table_note_reading_pressure(uint16_t short_addr, uint8_t ep, int16_t measured_value_0_1_kpa)
+{
+    device_record_t *rec = find_by_short(short_addr);
+    if (rec == NULL) {
+        return false;
+    }
+    if (measured_value_0_1_kpa == (int16_t)0x8000) {
+        return false;
+    }
+    if (rec->has_pressure && rec->pressure_0_1_kpa == measured_value_0_1_kpa) {
+        return false;
+    }
+    rec->has_pressure = true;
+    rec->pressure_0_1_kpa = measured_value_0_1_kpa;
+    readings_touch(rec, ep);
+    return true;
+}
+
+bool device_table_note_reading_ias_zone_status(uint16_t short_addr, uint8_t ep, uint16_t zone_status)
+{
+    device_record_t *rec = find_by_short(short_addr);
+    if (rec == NULL) {
+        return false;
+    }
+    if (rec->has_ias_zone_status && rec->ias_zone_status == zone_status) {
+        return false;
+    }
+    rec->has_ias_zone_status = true;
+    rec->ias_zone_status = zone_status;
+    readings_touch(rec, ep);
+    return true;
+}
+
+bool device_table_note_reading_battery_voltage(uint16_t short_addr, uint8_t ep, uint8_t voltage_100mv_units)
+{
+    device_record_t *rec = find_by_short(short_addr);
+    if (rec == NULL) {
+        return false;
+    }
+    if (voltage_100mv_units == 0xFFU) {
+        return false;
+    }
+    const uint16_t mv = (uint16_t)voltage_100mv_units * 100U;
+    if (rec->has_power_battery_voltage && rec->battery_mv == mv) {
+        return false;
+    }
+    rec->has_power_battery_voltage = true;
+    rec->battery_mv = mv;
+    readings_touch(rec, ep);
+    return true;
+}
+
+bool device_table_note_reading_battery_pct(uint16_t short_addr, uint8_t ep, uint8_t percentage_remaining_half_pct)
+{
+    device_record_t *rec = find_by_short(short_addr);
+    if (rec == NULL) {
+        return false;
+    }
+    if (percentage_remaining_half_pct == 0xFFU) {
+        return false;
+    }
+    uint16_t p = (uint16_t)percentage_remaining_half_pct / 2U;
+    if (p > 100U) {
+        p = 100U;
+    }
+    const uint8_t pct = (uint8_t)p;
+    if (rec->has_power_battery_pct && rec->battery_pct == pct) {
+        return false;
+    }
+    rec->has_power_battery_pct = true;
+    rec->battery_pct = pct;
+    readings_touch(rec, ep);
+    return true;
+}
+
+static bool record_has_cluster_in(const device_record_t *rec, uint16_t cluster_id)
+{
+    for (size_t i = 0; i < rec->clusters_in_len; ++i) {
+        if (rec->clusters_in[i] == cluster_id) {
+            return true;
+        }
+    }
+    return false;
+}
+
+static void sensor_poll_emit_ep(device_table_zcl_read_req_fn_t fn, uint16_t short_addr, uint8_t ep, const device_record_t *rec)
+{
+    const uint16_t CL_TEMP = 0x0402U;
+    const uint16_t CL_HUM = 0x0405U;
+    const uint16_t CL_OCC = 0x0406U;
+    const uint16_t CL_ONOFF = 0x0006U;
+    const uint16_t CL_ILL = 0x0400U;
+    const uint16_t CL_PRES = 0x0403U;
+    const uint16_t CL_PWR = 0x0001U;
+    const uint16_t CL_IAS = 0x0500U;
+    if (record_has_cluster_in(rec, CL_TEMP)) {
+        fn(short_addr, ep, CL_TEMP, 0x0000U);
+    }
+    if (record_has_cluster_in(rec, CL_HUM)) {
+        fn(short_addr, ep, CL_HUM, 0x0000U);
+    }
+    if (record_has_cluster_in(rec, CL_OCC)) {
+        fn(short_addr, ep, CL_OCC, 0x0000U);
+    }
+    if (record_has_cluster_in(rec, CL_ONOFF)) {
+        fn(short_addr, ep, CL_ONOFF, 0x0000U);
+    }
+    if (record_has_cluster_in(rec, CL_ILL)) {
+        fn(short_addr, ep, CL_ILL, 0x0000U);
+    }
+    if (record_has_cluster_in(rec, CL_PRES)) {
+        fn(short_addr, ep, CL_PRES, 0x0000U);
+    }
+    if (record_has_cluster_in(rec, CL_PWR)) {
+        fn(short_addr, ep, CL_PWR, 0x0020U);
+        fn(short_addr, ep, CL_PWR, 0x0021U);
+    }
+    if (record_has_cluster_in(rec, CL_IAS)) {
+        fn(short_addr, ep, CL_IAS, 0x0002U);
+    }
+}
+
+void device_table_request_sensor_poll_reads(device_table_zcl_read_req_fn_t fn)
+{
+    if (fn == NULL) {
+        return;
+    }
+    for (size_t i = 0; i < DEVICE_TABLE_MAX_DEVICES; ++i) {
+        const device_record_t *rec = &s_devices[i];
+        if (!rec->occupied || rec->short_addr == 0x0000U || rec->short_addr == 0xFFFFU) {
+            continue;
+        }
+        const uint16_t sa = rec->short_addr;
+        if (rec->endpoints_len == 0) {
+            sensor_poll_emit_ep(fn, sa, 1, rec);
+        } else {
+            for (size_t e = 0; e < rec->endpoints_len; ++e) {
+                sensor_poll_emit_ep(fn, sa, rec->endpoints[e], rec);
+            }
+        }
+    }
 }
 
 void device_table_persist_cache(void)
@@ -752,6 +1001,8 @@ void device_table_dump_json(void)
     printf("    \"read_req\": %" PRIu32 ",\n", s_telemetry.read_req);
     printf("    \"read_rsp_ok\": %" PRIu32 ",\n", s_telemetry.read_rsp_ok);
     printf("    \"read_rsp_fail\": %" PRIu32 ",\n", s_telemetry.read_rsp_fail);
+    printf("    \"report_attr_ok\": %" PRIu32 ",\n", s_telemetry.report_attr_ok);
+    printf("    \"report_attr_unchanged\": %" PRIu32 ",\n", s_telemetry.report_attr_unchanged);
     printf("    \"report_cfg_req\": %" PRIu32 ",\n", s_telemetry.report_cfg_req);
     printf("    \"report_cfg_rsp_ok\": %" PRIu32 ",\n", s_telemetry.report_cfg_rsp_ok);
     printf("    \"report_cfg_rsp_fail\": %" PRIu32 ",\n", s_telemetry.report_cfg_rsp_fail);
@@ -825,7 +1076,44 @@ void device_table_dump_json(void)
         for (size_t c = 0; c < d->clusters_out_len; ++c) {
             printf("%s\"0x%04X\"", (c == 0) ? "" : ",", d->clusters_out[c]);
         }
-        printf("]\n");
+        printf("],\n");
+        printf("      \"readings\": {\n");
+        printf("        \"source_ep\": %u,\n", (unsigned)d->readings_src_endpoint);
+        printf("        \"last_update_s\": %.3f", d->readings_last_update_s);
+        if (d->has_temperature) {
+            printf(",\n        \"temperature_c\": %.2f", (double)d->temperature_0_01_c / 100.0);
+        }
+        if (d->has_humidity) {
+            printf(",\n        \"humidity_pct\": %.2f", (double)d->humidity_0_01_pct / 100.0);
+        }
+        if (d->has_on_off) {
+            printf(",\n        \"on_off\": %s", d->on_off ? "true" : "false");
+        }
+        if (d->has_occupancy) {
+            printf(",\n        \"occupied\": %s,\n        \"occupancy_bitmap\": \"0x%02X\"", (d->occupancy_bitmap & 1U) ? "true" : "false",
+                   (unsigned)d->occupancy_bitmap);
+        }
+        if (d->has_illuminance) {
+            printf(",\n        \"illuminance_measured_value\": %u", (unsigned)d->illuminance_measured_value);
+            if (d->illuminance_measured_value != 0U) {
+                const double lx = pow(10.0, ((double)d->illuminance_measured_value - 1.0) / 10000.0);
+                printf(",\n        \"illuminance_lux\": %.6g", lx);
+            }
+        }
+        if (d->has_pressure) {
+            printf(",\n        \"pressure_0_1_kpa\": %d,\n        \"pressure_kpa\": %.2f", (int)d->pressure_0_1_kpa,
+                   (double)d->pressure_0_1_kpa / 10.0);
+        }
+        if (d->has_ias_zone_status) {
+            printf(",\n        \"ias_zone_status\": \"0x%04X\"", (unsigned)d->ias_zone_status);
+        }
+        if (d->has_power_battery_voltage) {
+            printf(",\n        \"power_battery_mv\": %u", (unsigned)d->battery_mv);
+        }
+        if (d->has_power_battery_pct) {
+            printf(",\n        \"power_battery_pct\": %u", (unsigned)d->battery_pct);
+        }
+        printf("\n      }\n");
         printf("    }");
     }
     printf("\n  ]\n");

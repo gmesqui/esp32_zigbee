@@ -84,8 +84,13 @@ La tabla mantiene, por dispositivo:
 
 - `ieee`, `short`, `device_id`,
 - `endpoints`, `clusters_in`, `clusters_out`,
-- `last_seen_s`, `lqi`, `rssi`,
-- `manufacturer`, `model`, `state_flags`.
+- `last_seen_s`, `lqi`, `rssi` (RSSI/LQI se rellenan desde la **tabla de vecinos NWK** al recibir informes ZCL, porque el SDK no los adjunta al callback de Report Attributes; en respuestas Read Attribute se usa el RSSI del marco ZCL y el LQI del vecino si existe),
+- `manufacturer`, `model`, `state_flags`,
+- `readings`: temperatura (°C), humedad (%), `on_off`, ocupación (bitmap), **iluminancia** (raw ZCL + `illuminance_lux` vía fórmula log del ZCL), **presión** (raw en décimas de kPa + `pressure_kpa`), **IAS Zone** (`ias_zone_status`), **batería** desde Power Config (`power_battery_mv`, `power_battery_pct`; también se reflejan en `battery_mv` / `battery_pct` a nivel dispositivo), según informes ZCL y respuestas Read Attribute; sondeo periódico ~60 s por radio (sin escritura NVS extra). **Solo se incluyen en JSON las claves de lectura que tienen dato** (no se emiten `null`). Si hay iluminancia raw `0` (demasiado baja), no se añade `illuminance_lux`.
+
+**Informes ZCL repetidos:** varias tramas con el mismo valor (p. ej. ON/OFF) son habituales. Cada trama sigue actualizando `last_seen_s` vía traza; el evento `DEVICE_REPORT` y los logs de valor solo se emiten si la lectura **cambia** respecto a la tabla. En telemetría JSON: `report_attr_ok` cuenta informes OK; `report_attr_unchanged` los que no alteraron el dato almacenado. `read_rsp_ok` / `read_rsp_fail` corresponden a **respuestas Read Attribute**, no a informes.
+
+**NVS cache dispositivos:** versión de blob `CACHE_VER=5` (telemetría ampliada; cachés anteriores se rechazan hasta reentrevistar).
 
 Al pulsar `1` en el monitor serie, se emite un JSON completo:
 
