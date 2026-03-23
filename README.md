@@ -59,6 +59,17 @@ Se persiste en NVS solo lo necesario para reanudar red:
 Si el estado existe y es valido, el arranque se hace como no-factory-new.
 Si no, se forma red nueva.
 
+## Particion NVS y cache de tabla (`zb_cache`)
+
+La tabla de dispositivos se guarda en NVS en formato **chunked** (`dt2_head`, `dt2_d0`…`dt2_d7`) **solo cuando cambia**
+(entrevista, identidad, clusters, etc.); no se hace wear por temporizador. `last_seen`/RSSI por tráfico no disparan guardado.
+La particion **`nvs`** debe ser lo bastante grande (en `partitions.csv` esta a **48 KiB**); si ves
+`ESP_ERR_NVS_NOT_ENOUGH_SPACE` al guardar `dt2_d7`, no reduzcas esa particion sin otra estrategia.
+
+**Importante:** si cambias offsets de `zb_storage` / `zb_fct` en `partitions.csv`, hay que flashear la
+tabla de particiones; el stack Zigbee usara la nueva region `zb_storage` (la red anterior en la
+direccion antigua dejara de leerse). Tras un cambio asi puede hacer falta **volver a formar** la red.
+
 ## Persistencia opcional (sugerida)
 
 Mantener separada de la minima. Sugerencias:
@@ -92,7 +103,7 @@ Componentes declarados en `main/idf_component.yml`:
 
 ## Estructura principal
 
-- `main/main.c`: arranque, bucle principal y guardado periodico.
+- `main/main.c`: arranque, bucle principal; NVS solo ante **cambios** (estado red y cache dispositivos).
 - `main/timebase.*`: reloj relativo del sistema.
 - `main/zb_persistence.*`: carga/guardado de estado de red en NVS.
 - `main/zb_trace.*`: trazas de mensajes Zigbee.

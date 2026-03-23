@@ -1,6 +1,7 @@
 # Name,      Type, SubType, Offset,   Size
-nvs,         data, nvs,     0x9000,   0x6000
-phy_init,    data, phy,     0xF000,   0x1000
-zb_storage,  data, fat,     0x10000,  0x10000
-zb_fct,      data, fat,     0x20000,  0x1000
+# NVS ampliada (48 KiB): cache dispositivos chunked + zb_state; sin esto ESP_ERR_NVS_NOT_ENOUGH_SPACE en dt2_d7.
+nvs,         data, nvs,     0x9000,   0xC000
+phy_init,    data, phy,     0x15000,  0x1000
+zb_storage,  data, fat,     0x16000,  0x10000
+zb_fct,      data, fat,     0x26000,  0x1000
 factory,     app,  factory, 0x30000,  0x3D0000

@@ -71,7 +71,7 @@ void app_main(void)
     serial_cmd_start();
 
     zb_persist_state_t runtime = {0};
-    double last_persist_s = 0.0;
+    zb_persist_state_t last_persisted_zb = saved;
     bool permit_join_open = false;
     TickType_t permit_join_deadline = 0;
     bool button_prev_pressed = false;
@@ -107,13 +107,18 @@ void app_main(void)
             ESP_LOGI(TAG, "[T+%07.3f] Permit join expirado (180s) -> CERRADO", timebase_now_s());
         }
 
-        const double now_s = timebase_now_s();
-        if ((now_s - last_persist_s) >= 5.0) {
-            if (zb_coordinator_get_runtime_state(&runtime) == ESP_OK) {
-                (void)zb_persistence_save(&runtime);
+        if (zb_coordinator_get_runtime_state(&runtime) == ESP_OK) {
+            if (memcmp(&runtime, &last_persisted_zb, sizeof(runtime)) != 0) {
+                const esp_err_t pe = zb_persistence_save(&runtime);
+                if (pe == ESP_OK) {
+                    last_persisted_zb = runtime;
+                    ESP_LOGI(TAG, "[T+%07.3f] Estado red guardado en NVS (cambio detectado)", timebase_now_s());
+                } else {
+                    ESP_LOGW(TAG, "[T+%07.3f] NVS estado red no guardado: %s", timebase_now_s(), esp_err_to_name(pe));
+                }
             }
-            last_persist_s = now_s;
         }
+        device_table_persist_cache();
 
         led_status_poll();
         vTaskDelay(pdMS_TO_TICKS(25));

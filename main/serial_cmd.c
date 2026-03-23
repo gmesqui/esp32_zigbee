@@ -27,5 +27,6 @@ static void serial_cmd_task(void *arg)
 
 void serial_cmd_start(void)
 {
-    xTaskCreate(serial_cmd_task, "serial_cmd_task", 4096, NULL, 5, NULL);
+    /* JSON grande + printf de flotantes requiere mas stack que 4KB. */
+    xTaskCreate(serial_cmd_task, "serial_cmd_task", 12288, NULL, 5, NULL);
 }

@@ -1,0 +1,2 @@
+# Mantener desactivado el timestamp de logs de la app (IDF logger).
+CONFIG_LOG_TIMESTAMP_SOURCE_NONE=y
