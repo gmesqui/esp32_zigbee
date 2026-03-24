@@ -3,6 +3,7 @@
 
 #include "driver/gpio.h"
 #include "esp_log.h"
+#include "nvs_flash.h"
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
 
@@ -11,7 +12,6 @@
 #include "serial_cmd.h"
 #include "timebase.h"
 #include "zb_coordinator.h"
-#include "zb_persistence.h"
 
 static const char *TAG = "app_main";
 static const gpio_num_t BOOT_BUTTON_GPIO = GPIO_NUM_28;
@@ -46,18 +46,19 @@ static void on_zb_event(const char *event_name)
 
 void app_main(void)
 {
-    ESP_ERROR_CHECK(zb_persistence_init());
+    esp_err_t nvs_err = nvs_flash_init();
+    if (nvs_err == ESP_ERR_NVS_NO_FREE_PAGES || nvs_err == ESP_ERR_NVS_NEW_VERSION_FOUND) {
+        ESP_ERROR_CHECK(nvs_flash_erase());
+        nvs_err = nvs_flash_init();
+    }
+    ESP_ERROR_CHECK(nvs_err);
     timebase_init();
     device_table_init();
     led_status_init();
     led_status_set_base(LED_BASE_BOOT);
 
-    zb_persist_state_t saved = {0};
-    saved.version = ZB_PERSIST_VERSION;
-    ESP_ERROR_CHECK(zb_persistence_load(&saved));
-
     ESP_LOGI(TAG, "[T+%07.3f] Boot coordinador Zigbee base", timebase_now_s());
-    ESP_ERROR_CHECK(zb_coordinator_init(&saved, on_zb_event));
+    ESP_ERROR_CHECK(zb_coordinator_init(on_zb_event));
 
     gpio_config_t io_conf = {
         .pin_bit_mask = (1ULL << BOOT_BUTTON_GPIO),
@@ -70,15 +71,27 @@ void app_main(void)
 
     serial_cmd_start();
 
-    zb_persist_state_t runtime = {0};
-    zb_persist_state_t last_persisted_zb = saved;
     bool permit_join_open = false;
     TickType_t permit_join_deadline = 0;
     bool button_prev_pressed = false;
     TickType_t last_button_tick = 0;
+    bool zigbee_poll_degraded = false;
     const TickType_t debounce_ticks = pdMS_TO_TICKS(120);
     while (true) {
-        ESP_ERROR_CHECK(zb_coordinator_poll());
+        const esp_err_t poll_err = zb_coordinator_poll();
+        if (poll_err == ESP_OK) {
+            if (zigbee_poll_degraded) {
+                ESP_LOGI(TAG, "[T+%07.3f] Poll Zigbee recuperado", timebase_now_s());
+                zigbee_poll_degraded = false;
+            }
+        } else if (poll_err == ESP_ERR_TIMEOUT || poll_err == ESP_ERR_INVALID_STATE) {
+            if (!zigbee_poll_degraded) {
+                ESP_LOGW(TAG, "[T+%07.3f] Poll Zigbee temporalmente degradado: %s", timebase_now_s(), esp_err_to_name(poll_err));
+                zigbee_poll_degraded = true;
+            }
+        } else {
+            ESP_ERROR_CHECK(poll_err);
+        }
 
         const bool button_pressed = (gpio_get_level(BOOT_BUTTON_GPIO) == 0);
         const TickType_t now_tick = xTaskGetTickCount();
@@ -107,17 +120,6 @@ void app_main(void)
             ESP_LOGI(TAG, "[T+%07.3f] Permit join expirado (180s) -> CERRADO", timebase_now_s());
         }
 
-        if (zb_coordinator_get_runtime_state(&runtime) == ESP_OK) {
-            if (memcmp(&runtime, &last_persisted_zb, sizeof(runtime)) != 0) {
-                const esp_err_t pe = zb_persistence_save(&runtime);
-                if (pe == ESP_OK) {
-                    last_persisted_zb = runtime;
-                    ESP_LOGI(TAG, "[T+%07.3f] Estado red guardado en NVS (cambio detectado)", timebase_now_s());
-                } else {
-                    ESP_LOGW(TAG, "[T+%07.3f] NVS estado red no guardado: %s", timebase_now_s(), esp_err_to_name(pe));
-                }
-            }
-        }
         device_table_persist_cache();
 
         led_status_poll();
