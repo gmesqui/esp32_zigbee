@@ -1,0 +1,28 @@
+menu "MQTT Bridge"
+
+    config MQTT_BRIDGE_MDNS_HOSTNAME
+        string "mDNS hostname"
+        default "zb-coordinator"
+        help
+            Hostname anunciado por mDNS cuando el coordinador obtiene IP por Ethernet.
+
+    config MQTT_BRIDGE_MDNS_INSTANCE
+        string "mDNS instance name"
+        default "ESP32-C5 Zigbee Coordinator"
+        help
+            Nombre descriptivo anunciado por mDNS.
+
+    config MQTT_BRIDGE_MQTT_BROKER_URI
+        string "MQTT broker URI"
+        default ""
+        help
+            URI del broker MQTT. Ejemplo: mqtt://192.168.1.10:1883
+            Si se deja vacio, el bridge no arranca el cliente MQTT.
+
+    config MQTT_BRIDGE_MQTT_CLIENT_ID
+        string "MQTT client id"
+        default "esp32c5-zb-coordinator"
+        help
+            Client ID usado por el cliente MQTT del coordinador.
+
+endmenu

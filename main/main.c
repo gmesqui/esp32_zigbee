@@ -3,18 +3,43 @@
 
 #include "driver/gpio.h"
 #include "esp_log.h"
+#include "esp_wifi.h"
 #include "nvs_flash.h"
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
 
 #include "device_table.h"
 #include "led_status.h"
+#include "mqtt_bridge.h"
 #include "serial_cmd.h"
 #include "timebase.h"
 #include "zb_coordinator.h"
 
 static const char *TAG = "app_main";
 static const gpio_num_t BOOT_BUTTON_GPIO = GPIO_NUM_28;
+
+static void disable_wifi_radio(void)
+{
+#if CONFIG_ESP_WIFI_ENABLED
+    const esp_err_t stop_err = esp_wifi_stop();
+    if (stop_err == ESP_OK) {
+        ESP_LOGW(TAG, "[T+%07.3f] WiFi stop forzado al arrancar", timebase_now_s());
+    } else if (stop_err != ESP_ERR_WIFI_NOT_INIT) {
+        ESP_LOGW(TAG, "[T+%07.3f] esp_wifi_stop devolvio %s", timebase_now_s(), esp_err_to_name(stop_err));
+    }
+
+    const esp_err_t deinit_err = esp_wifi_deinit();
+    if (deinit_err == ESP_OK) {
+        ESP_LOGW(TAG, "[T+%07.3f] WiFi deinit forzado al arrancar", timebase_now_s());
+    } else if (deinit_err == ESP_ERR_WIFI_NOT_INIT) {
+        ESP_LOGI(TAG, "[T+%07.3f] WiFi ya estaba desactivado (driver no inicializado)", timebase_now_s());
+    } else {
+        ESP_LOGW(TAG, "[T+%07.3f] esp_wifi_deinit devolvio %s", timebase_now_s(), esp_err_to_name(deinit_err));
+    }
+#else
+    ESP_LOGI(TAG, "[T+%07.3f] WiFi compilado como desactivado", timebase_now_s());
+#endif
+}
 
 static void on_zb_event(const char *event_name)
 {
@@ -56,8 +81,13 @@ void app_main(void)
     device_table_init();
     led_status_init();
     led_status_set_base(LED_BASE_BOOT);
+    disable_wifi_radio();
 
     ESP_LOGI(TAG, "[T+%07.3f] Boot coordinador Zigbee base", timebase_now_s());
+    const esp_err_t bridge_err = mqtt_bridge_init();
+    if (bridge_err != ESP_OK) {
+        ESP_LOGE(TAG, "[T+%07.3f] mqtt_bridge_init fallo: %s", timebase_now_s(), esp_err_to_name(bridge_err));
+    }
     ESP_ERROR_CHECK(zb_coordinator_init(on_zb_event));
 
     gpio_config_t io_conf = {

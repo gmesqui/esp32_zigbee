@@ -1,4 +1,14 @@
 dependencies:
+  espressif/enc28j60:
+    component_hash: a20c685004ea37f9b2fe4ba6d5d0ba948f9ec3a46a4dab0d471b151575a90e27
+    dependencies:
+    - name: idf
+      require: private
+      version: '>=4.4'
+    source:
+      registry_url: https://components.espressif.com/
+      type: service
+    version: 1.0.1
   espressif/esp-zboss-lib:
     component_hash: 321883d142421f65009972408287441794250057668a11abbdfd8bec77c3309a
     dependencies:
@@ -29,14 +39,26 @@ dependencies:
       registry_url: https://components.espressif.com/
       type: service
     version: 3.0.3
+  espressif/mdns:
+    component_hash: 7c0fa01a1cd0e72a87ec1928c3b661c0a3a9034a6d3a69dcf4850db8c6f272db
+    dependencies:
+    - name: idf
+      require: private
+      version: '>=5.0'
+    source:
+      registry_url: https://components.espressif.com/
+      type: service
+    version: 1.10.1
   idf:
     source:
       type: idf
     version: 5.5.3
 direct_dependencies:
+- espressif/enc28j60
 - espressif/esp-zboss-lib
 - espressif/esp-zigbee-lib
 - espressif/led_strip
-manifest_hash: 23bc550b82cca0115352a9fe8958a1a79ffd94ae4dc8a70d74b67021bc9e541e
+- espressif/mdns
+manifest_hash: 530953458b434e6d66317bc4826099dfff8b817e06aa81d24888924dea781b48
 target: esp32c5
 version: 2.0.0

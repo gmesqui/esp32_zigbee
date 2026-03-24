@@ -74,8 +74,8 @@ typedef struct {
     uint8_t phase;
     uint8_t retries;
     uint8_t ep_count;
-    uint8_t ep_idx;
     uint8_t ep_list[DEVICE_TABLE_MAX_ENDPOINTS];
+    bool simple_desc_done[DEVICE_TABLE_MAX_ENDPOINTS];
     TickType_t next_tick;
     double last_seen_s;
     double last_interview_s;
@@ -216,6 +216,32 @@ static bool interview_job_complete(const interview_job_t *job)
 static bool interview_job_has_useful_profile(const interview_job_t *job)
 {
     return (job != NULL && (job->simple_desc_ok || job->node_desc_ok || job->active_ep_ok));
+}
+
+static int interview_endpoint_slot(const interview_job_t *job, uint8_t endpoint)
+{
+    if (job == NULL) {
+        return -1;
+    }
+    for (uint8_t i = 0; i < job->ep_count; ++i) {
+        if (job->ep_list[i] == endpoint) {
+            return (int)i;
+        }
+    }
+    return -1;
+}
+
+static bool interview_all_simple_desc_done(const interview_job_t *job)
+{
+    if (job == NULL || !job->active_ep_ok || job->ep_count == 0U) {
+        return false;
+    }
+    for (uint8_t i = 0; i < job->ep_count; ++i) {
+        if (!job->simple_desc_done[i]) {
+            return false;
+        }
+    }
+    return true;
 }
 
 static bool interview_request_enqueue(uint16_t short_addr, const char *reason)
@@ -429,10 +455,13 @@ static void identity_job_schedule(uint16_t short_addr, uint8_t endpoint, TickTyp
         ESP_LOGW(TAG, "[T+%07.3f] Sin slot para entrevista identidad short=0x%04X ep=%u", timebase_now_s(), short_addr, endpoint);
         return;
     }
-    j->next_try_tick = xTaskGetTickCount() + delay_ticks;
-    j->attempts = 0;
-    j->got_manufacturer = false;
-    j->got_model = false;
+    const TickType_t target_tick = xTaskGetTickCount() + delay_ticks;
+    if (j->got_manufacturer && j->got_model) {
+        return;
+    }
+    if (!j->used || j->next_try_tick == 0 || (int32_t)(target_tick - j->next_try_tick) < 0) {
+        j->next_try_tick = target_tick;
+    }
 }
 
 static void attr_to_text(const uint8_t *value, uint16_t value_size, char *out, size_t out_len)
@@ -454,6 +483,18 @@ static void attr_to_text(const uint8_t *value, uint16_t value_size, char *out, s
     }
     memcpy(out, &value[1], copy_n);
     out[copy_n] = '\0';
+}
+
+static bool zcl_attr_get_on_off_value(const esp_zb_zcl_attribute_t *attr, bool *out_on)
+{
+    if (attr == NULL || out_on == NULL || attr->data.value == NULL || attr->data.size < 1U) {
+        return false;
+    }
+    if (attr->data.type != ESP_ZB_ZCL_ATTR_TYPE_BOOL && attr->data.type != ESP_ZB_ZCL_ATTR_TYPE_U8) {
+        return false;
+    }
+    *out_on = (*(const uint8_t *)attr->data.value != 0U);
+    return true;
 }
 
 /** Interpreta atributo ZCL y actualiza lecturas en la tabla (informes y Read RSP). @return true si la lectura almacenada cambio. */
@@ -488,18 +529,10 @@ static bool zcl_apply_attribute_to_readings(uint16_t short_addr, uint8_t ep, uin
         return false;
     }
     if (cluster_id == ESP_ZB_ZCL_CLUSTER_ID_ON_OFF && attr->id == ESP_ZB_ZCL_ATTR_ON_OFF_ON_OFF_ID) {
-        if (ty == ESP_ZB_ZCL_ATTR_TYPE_BOOL && attr->data.size >= 1U) {
-            const uint8_t b = *(const uint8_t *)pv;
-            if (device_table_note_reading_on_off(short_addr, ep, b != 0U)) {
-                ESP_LOGI(TAG, "[T+%07.3f] Valor on_off short=0x%04X ep=%u -> %s", timebase_now_s(), short_addr, ep, b ? "ON" : "OFF");
-                return true;
-            }
-            return false;
-        }
-        if (ty == ESP_ZB_ZCL_ATTR_TYPE_U8 && attr->data.size >= 1U) {
-            const uint8_t b = *(const uint8_t *)pv;
-            if (device_table_note_reading_on_off(short_addr, ep, b != 0U)) {
-                ESP_LOGI(TAG, "[T+%07.3f] Valor on_off short=0x%04X ep=%u -> %s", timebase_now_s(), short_addr, ep, b ? "ON" : "OFF");
+        bool on = false;
+        if (zcl_attr_get_on_off_value(attr, &on)) {
+            if (device_table_note_reading_on_off(short_addr, ep, on)) {
+                ESP_LOGI(TAG, "[T+%07.3f] Valor on_off short=0x%04X ep=%u -> %s", timebase_now_s(), short_addr, ep, on ? "ON" : "OFF");
                 return true;
             }
         }
@@ -706,6 +739,12 @@ static void simple_desc_cb(esp_zb_zdp_status_t zdo_status, esp_zb_af_simple_desc
         return;
     }
 
+    const int ep_slot = interview_endpoint_slot(job, req_ep);
+    if (job != NULL && ep_slot >= 0 && job->simple_desc_done[ep_slot]) {
+        ESP_LOGI(TAG, "[T+%07.3f] Entrevista simple desc duplicada ignorada short=0x%04X ep=%u", timebase_now_s(), short_addr, req_ep);
+        return;
+    }
+
     const uint8_t in_count = simple_desc->app_input_cluster_count;
     const uint8_t out_count = simple_desc->app_output_cluster_count;
     const uint8_t total = (uint8_t)(in_count + out_count);
@@ -728,11 +767,11 @@ static void simple_desc_cb(esp_zb_zdp_status_t zdo_status, esp_zb_af_simple_desc
     emit_event("INTERVIEW_SIMPLE_DESC");
     if (job != NULL) {
         job->phase = 3;
-        job->simple_desc_ok = true;
-        if (job->ep_idx < job->ep_count && job->ep_list[job->ep_idx] == req_ep) {
-            job->ep_idx++;
+        if (ep_slot >= 0) {
+            job->simple_desc_done[ep_slot] = true;
         }
-        if (job->ep_idx >= job->ep_count) {
+        job->simple_desc_ok = interview_all_simple_desc_done(job);
+        if (job->simple_desc_ok) {
             job->last_interview_s = timebase_now_s();
             job->retries = 0;
             job->phase = 4;
@@ -844,13 +883,19 @@ static void active_ep_cb(esp_zb_zdp_status_t zdo_status, uint8_t ep_count, uint8
         return;
     }
 
+    if (job != NULL && job->active_ep_ok) {
+        ESP_LOGI(TAG, "[T+%07.3f] Entrevista active_ep duplicada ignorada short=0x%04X endpoints=%u", timebase_now_s(), short_addr, ep_count);
+        return;
+    }
+
     ESP_LOGI(TAG, "[T+%07.3f] Entrevista short=0x%04X endpoints=%u", timebase_now_s(), short_addr, ep_count);
     if (job != NULL) {
         job->phase = 2;
         job->active_ep_ok = true;
         job->ep_count = (ep_count > DEVICE_TABLE_MAX_ENDPOINTS) ? DEVICE_TABLE_MAX_ENDPOINTS : ep_count;
-        job->ep_idx = 0;
         memcpy(job->ep_list, ep_id_list, job->ep_count);
+        memset(job->simple_desc_done, 0, sizeof(job->simple_desc_done));
+        job->simple_desc_ok = false;
     }
     for (uint8_t i = 0; i < ep_count; ++i) {
         interview_request_simple_desc(short_addr, ep_id_list[i]);
@@ -876,6 +921,10 @@ static void node_desc_cb(esp_zb_zdp_status_t zdo_status, uint16_t addr, esp_zb_a
             job->next_tick = delay_with_jitter_ms(1000U + ((uint32_t)job->retries * 600U), 400U, short_addr, job->retries);
         }
         device_table_mark_interview(short_addr, 1, false, true);
+        return;
+    }
+    if (job != NULL && job->node_desc_ok) {
+        ESP_LOGI(TAG, "[T+%07.3f] Entrevista node_desc duplicada ignorada short=0x%04X", timebase_now_s(), short_addr);
         return;
     }
     device_table_update_node_desc(short_addr, node_desc->node_desc_flags, node_desc->mac_capability_flags, node_desc->manufacturer_code,
@@ -919,10 +968,10 @@ static void interview_start(uint16_t short_addr)
         job->retries = 0;
         job->phase = 1;
         job->ep_count = 0;
-        job->ep_idx = 0;
         job->node_desc_ok = false;
         job->active_ep_ok = false;
         job->simple_desc_ok = false;
+        memset(job->simple_desc_done, 0, sizeof(job->simple_desc_done));
         job->last_seen_s = now_s;
         job->next_tick = delay_with_jitter_ms(1000U, 400U, short_addr, 1U);
         device_table_mark_interview(short_addr, 1, false, false);
@@ -1019,11 +1068,28 @@ static void health_and_interview_poll(void)
                 j->retries = 0;
                 continue;
             }
-            interview_request_node_desc(j->short_addr);
-            esp_zb_zdo_active_ep_req_param_t active_req = {
-                .addr_of_interest = j->short_addr,
-            };
-            esp_zb_zdo_active_ep_req(&active_req, active_ep_cb, (void *)(uintptr_t)j->short_addr);
+            bool requested = false;
+            if (!j->node_desc_ok) {
+                interview_request_node_desc(j->short_addr);
+                requested = true;
+            }
+            if (!j->active_ep_ok) {
+                esp_zb_zdo_active_ep_req_param_t active_req = {
+                    .addr_of_interest = j->short_addr,
+                };
+                esp_zb_zdo_active_ep_req(&active_req, active_ep_cb, (void *)(uintptr_t)j->short_addr);
+                requested = true;
+            } else if (!j->simple_desc_ok) {
+                for (uint8_t ep_i = 0; ep_i < j->ep_count; ++ep_i) {
+                    if (!j->simple_desc_done[ep_i]) {
+                        interview_request_simple_desc(j->short_addr, j->ep_list[ep_i]);
+                        requested = true;
+                    }
+                }
+            }
+            if (!requested) {
+                continue;
+            }
             j->retries++;
             device_table_mark_interview(j->short_addr, 2, false, true);
             j->next_tick = delay_with_jitter_ms(1200U + ((uint32_t)j->retries * 900U), 500U, j->short_addr, j->retries);
@@ -1201,6 +1267,13 @@ static esp_err_t zb_action_handler(esp_zb_core_action_callback_id_t callback_id,
             device_table_inc_counter("report_attr_ok");
             if (!reading_changed) {
                 device_table_inc_counter("report_attr_unchanged");
+                if (m->cluster == ESP_ZB_ZCL_CLUSTER_ID_ON_OFF && m->attribute.id == ESP_ZB_ZCL_ATTR_ON_OFF_ON_OFF_ID) {
+                    bool on = false;
+                    if (zcl_attr_get_on_off_value(&m->attribute, &on)) {
+                        ESP_LOGI(TAG, "[T+%07.3f] Reporte on_off sin cambio short=0x%04X ep=%u -> %s", timebase_now_s(),
+                                 meta.src_short, m->src_endpoint, on ? "ON" : "OFF");
+                    }
+                }
             }
         }
         if (reading_changed) {
@@ -1451,7 +1524,12 @@ void zb_coordinator_get_ram_snapshot(zb_coordinator_ram_snapshot_t *out)
         d->phase = j->phase;
         d->retries = j->retries;
         d->ep_count = j->ep_count;
-        d->ep_idx = j->ep_idx;
+        d->ep_idx = 0;
+        for (uint8_t ep_i = 0; ep_i < j->ep_count; ++ep_i) {
+            if (j->simple_desc_done[ep_i]) {
+                d->ep_idx++;
+            }
+        }
         d->node_desc_ok = j->node_desc_ok;
         d->active_ep_ok = j->active_ep_ok;
         d->simple_desc_ok = j->simple_desc_ok;
