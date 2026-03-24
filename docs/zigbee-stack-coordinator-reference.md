@@ -17,7 +17,153 @@ Limites intencionados:
 - No se asume ninguna estructura local de firmware.
 - Cuando se habla de "dispositivo Zigbee" se propone un modelo de datos recomendado para la aplicacion, porque el stack oficial no expone un `esp_zb_device_t` monolitico para el coordinador.
 
-## 1. Mapa mental del stack
+## Indice
+
+1. [Nombres especiales y su significado](#1-nombres-especiales-y-su-significado)
+2. [Mapa mental del stack](#2-mapa-mental-del-stack)
+3. [Flujo tipico en un coordinador](#3-flujo-tipico-en-un-coordinador)
+4. [Donde entran los mensajes al coordinador](#4-donde-entran-los-mensajes-al-coordinador)
+5. [Mensajes que el coordinador puede enviar](#5-mensajes-que-el-coordinador-puede-enviar)
+6. [Como modelar un dispositivo Zigbee en la aplicacion](#6-como-modelar-un-dispositivo-zigbee-en-la-aplicacion)
+7. [Persistencia del stack, cache y `zb_storage`](#7-persistencia-del-stack-cache-y-zb_storage)
+8. [Ejemplos de secuencias de mensajes](#8-ejemplos-de-secuencias-de-mensajes)
+9. [Recomendaciones para no saturar la red](#9-recomendaciones-para-no-saturar-la-red)
+10. [Criterio practico para una app coordinador](#10-criterio-practico-para-una-app-coordinador)
+11. [Fuentes oficiales](#11-fuentes-oficiales)
+
+## 1. Nombres especiales y su significado
+
+Antes de entrar en callbacks y mensajes, conviene fijar las capas, siglas y terminos que se usaran en todo el documento.
+
+- `APS`
+  Capa Application Support. Gestiona addressing, endpoints y confirmaciones APS.
+
+- `atributo`
+  Es un dato dentro de un cluster. Por ejemplo, temperatura medida, estado on/off o porcentaje de bateria.
+
+- `BDB`
+  Base Device Behavior. Conjunto de procedimientos de comisionamiento: formacion de red, steering, Touchlink y Finding & Binding.
+
+- `bind`
+  Asociacion entre un cluster origen y un destino para que un dispositivo envie mensajes a otro sin que la aplicacion haga routing manual cada vez.
+
+- `cluster`
+  Unidad funcional ZCL. Ejemplos: `On/Off`, `Temperature Measurement`, `IAS Zone`.
+
+- `cluster client`
+  Lado que consume un servicio o recibe ciertos comandos.
+
+- `cluster server`
+  Lado que expone atributos o implementa comandos del cluster.
+
+- `command direction`
+  Direccion logica del comando ZCL:
+  - `TO_SRV`
+  - `TO_CLI`
+
+- `descriptor`
+  Es una estructura ZDO que describe el nodo o un endpoint. Los mas importantes para un coordinador son `node descriptor`, `power descriptor`, `active endpoints` y `simple descriptor`.
+
+- `device_id`
+  Identificador del tipo de dispositivo dentro de un perfil, declarado en el simple descriptor del endpoint.
+
+- `endpoint`
+  Es un identificador de aplicacion dentro de un nodo. Un mismo dispositivo puede exponer varios endpoints.
+
+- `Extended PAN ID`
+  Identificador de 64 bits de la red Zigbee.
+
+- `Finding & Binding`
+  Procedimiento BDB para localizar dispositivos compatibles y crear bindings entre ellos de forma asistida.
+
+- `IEEE address`
+  Direccion larga de 64 bits, estable y unica por dispositivo.
+
+- `LQI`
+  Link Quality Indicator. Estimacion de calidad de enlace.
+
+- `logical channel`
+  Canal Zigbee usado por la red. En 2.4 GHz suele estar entre 11 y 26.
+
+- `MAC`
+  Es la capa IEEE 802.15.4 por debajo de NWK. Aqui viven canal, tramas MAC y capacidades radio basicas.
+
+- `manufacturer code`
+  Codigo del fabricante que aparece, por ejemplo, en node descriptor o en comandos manufacturer-specific.
+
+- `match descriptor`
+  Consulta ZDO para encontrar nodos/endpoints que soportan cierto perfil y conjuntos de clusters.
+
+- `NWK`
+  Es la capa de red Zigbee. Maneja direccion corta, routing, joins, rejoins y parte de la topologia.
+
+- `NWK address` o `short address`
+  Direccion corta de 16 bits asignada por la red. Puede cambiar con el tiempo.
+
+- `node descriptor`
+  Descriptor ZDO del nodo completo: capacidades MAC, fabricante, tamanos maximos de transferencia, server mask, etc.
+
+- `PAN ID`
+  Identificador corto de red de 16 bits.
+
+- `permit join`
+  Estado que determina si la red o un router aceptan nuevos joins.
+
+- `steering` o `network steering`
+  Procedimiento BDB por el que un dispositivo intenta encontrar una red Zigbee adecuada y unirse a ella, o bien permite que otros nodos localicen una red abierta y entren en ella.
+
+- `power descriptor`
+  Descriptor ZDO con informacion de alimentacion y modo de consumo del nodo.
+
+- `profile ID`
+  Perfil de aplicacion. Ejemplos:
+  - `0x0000` para ZDO
+  - `0x0104` para Home Automation
+  - `0x0109` para Smart Energy
+  - `0xC05E` para ZLL
+  - `0xA1E0` para Green Power
+
+- `reportable change`
+  Umbral de cambio usado por `Configure Reporting` para que un atributo analogico decida si debe informar.
+
+- `RSSI`
+  Nivel de senal recibido. En callbacks ZCL aparece en `esp_zb_zcl_frame_header_t`.
+
+- `server mask`
+  Bitmap del node descriptor que indica roles especiales del nodo, por ejemplo `Trust Center` o `Network Manager`.
+
+- `simple descriptor`
+  Descriptor de un endpoint: perfil, device ID, version, lista de input clusters y output clusters.
+
+- `Touchlink`
+  Procedimiento BDB de comisionamiento por proximidad entre dispositivos compatibles, tipico en entornos de iluminacion. Permite formar una red o incorporar un nodo usando un intercambio inter-PAN y reglas especificas de proximidad, seguridad y autorizacion.
+
+- `TC` o `Trust Center`
+  Autoridad de seguridad de la red Zigbee. En una red clasica, el coordinador centralizado suele ejercer ese papel.
+
+- `TSN`
+  Transaction Sequence Number. Numero de secuencia de transaccion ZCL.
+
+- `unbind`
+  Eliminacion de una entrada de binding.
+
+- `ZCL`
+  Zigbee Cluster Library. Define atributos, comandos y clusters de aplicacion.
+
+- `ZDO`
+  Zigbee Device Object. Define discovery, descriptors, management y senales del stack.
+
+- `ZDP`
+  Zigbee Device Profile. Perfil usado por ZDO, incluyendo estados y respuestas ZDP.
+
+Con ese vocabulario, el resto del documento se puede leer asi:
+
+- `BDB` prepara o modifica el estado de comisionamiento de la red.
+- `ZDO` descubre y describe nodos.
+- `ZCL` transporta la semantica de aplicacion.
+- `APS` y `NWK` son la infraestructura de transporte y direccionamiento que hay por debajo.
+
+## 2. Mapa mental del stack
 
 Desde un coordinador, la aplicacion no ve "la red Zigbee" como un unico flujo de mensajes. La API oficial separa la informacion en tres planos:
 
@@ -39,7 +185,7 @@ La consecuencia practica es importante:
   - mensajes ZCL,
   - y metadatos locales como timestamps, salud y cache.
 
-## 2. Flujo tipico en un coordinador
+## 3. Flujo tipico en un coordinador
 
 Un coordinador basado en la API oficial suele seguir este esquema:
 
@@ -55,9 +201,9 @@ Un coordinador basado en la API oficial suele seguir este esquema:
    - configura reporting si conviene.
 5. Mantiene el estado del nodo con reports ZCL, respuestas ZDO y eventos de red.
 
-## 3. Donde entran los mensajes al coordinador
+## 4. Donde entran los mensajes al coordinador
 
-### 3.1 Senales globales del stack (`esp_zb_app_signal_handler`)
+### 4.1 Senales globales del stack (`esp_zb_app_signal_handler`)
 
 Estas son las senales del enum `esp_zb_app_signal_type_t` que un coordinador puede recibir. Algunas son opcionales o dependen de features de build.
 
@@ -187,7 +333,7 @@ Estas son las senales del enum `esp_zb_app_signal_type_t` que un coordinador pue
 
 - `ESP_ZB_ZGP_SIGNAL_APPROVE_COMMISSIONING`
   La app debe aprobar o rechazar un pairing GP. Payload: `esp_zb_zgp_signal_approve_comm_params_t`.
-### 3.2 Respuestas ZDO a peticiones de la aplicacion
+### 4.2 Respuestas ZDO a peticiones de la aplicacion
 
 Estas respuestas tambien son "mensajes recibidos" por el coordinador, pero no llegan por `app_signal`; llegan por el callback asociado a la peticion enviada.
 
@@ -289,7 +435,7 @@ Estas respuestas tambien son "mensajes recibidos" por el coordinador, pero no ll
   - `transmission_failures`
   - `energy_values[]`
 
-### 3.3 Mensajes ZCL y acciones (`esp_zb_core_action_callback_id_t`)
+### 4.3 Mensajes ZCL y acciones (`esp_zb_core_action_callback_id_t`)
 
 Aqui esta la otra gran familia de mensajes entrantes. Estos callbacks representan tanto comandos recibidos como respuestas ZCL y eventos de atributos.
 
@@ -412,9 +558,9 @@ Aqui esta la otra gran familia de mensajes entrantes. Estos callbacks representa
 - `ESP_ZB_CORE_CMD_THERMOSTAT_GET_WEEKLY_SCHEDULE_RESP_CB_ID` -> `esp_zb_zcl_thermostat_get_weekly_schedule_resp_message_t`
 - `ESP_ZB_CORE_CMD_GREEN_POWER_RECV_CB_ID` -> `esp_zb_zcl_cmd_green_power_recv_message_t`
 - `ESP_ZB_CORE_REPORT_ATTR_CB_ID` -> `esp_zb_zcl_report_attr_message_t`
-## 4. Mensajes que el coordinador puede enviar
+## 5. Mensajes que el coordinador puede enviar
 
-### 4.1 Control del stack y BDB
+### 5.1 Control del stack y BDB
 
 Aunque no todo es "mensaje de aplicacion" en sentido estricto, estas APIs determinan que trafico de red puede generar el coordinador:
 
@@ -463,7 +609,7 @@ Aunque no todo es "mensaje de aplicacion" en sentido estricto, estas APIs determ
 - `esp_zb_bdb_finding_binding_cancel_initiator()`
   Control del flujo Finding & Binding.
 
-### 4.2 Peticiones ZDO que el coordinador puede emitir
+### 5.2 Peticiones ZDO que el coordinador puede emitir
 
 Estas son las primitivas ZDO publicas relevantes en la API oficial:
 
@@ -524,7 +670,7 @@ Estas son las primitivas ZDO publicas relevantes en la API oficial:
 - `esp_zb_zdo_mgmt_nwk_update_req()`
   Escanear energia, solicitar cambio de canal o actualizar parametros NWK.
 
-### 4.3 Comandos ZCL genericos
+### 5.3 Comandos ZCL genericos
 
 Estas APIs sirven para casi todos los clusters, incluidos los clusters de sensores que no tienen comandos especificos propios:
 
@@ -557,7 +703,7 @@ Esto es importante para la capa de aplicacion:
   - `Discover Attributes`,
   - y reports entrantes.
 
-### 4.4 Comandos ZCL especificos por familia
+### 5.4 Comandos ZCL especificos por familia
 
 Estas son las familias de comandos ZCL con APIs especificas de envio en `esp_zigbee_zcl_command.h`.
 
@@ -672,7 +818,7 @@ Estas son las familias de comandos ZCL con APIs especificas de envio en `esp_zig
 - `esp_zb_zcl_alarms_alarm_cmd_req()`
 - `esp_zb_zcl_custom_cluster_cmd_req()`
 
-### 4.5 Clusters soportados por el SDK que suelen explotarse via atributos
+### 5.5 Clusters soportados por el SDK que suelen explotarse via atributos
 
 El SDK expone cabeceras y tipos para muchos clusters que, desde un coordinador, suelen usarse sobre todo mediante los comandos ZCL genericos del apartado anterior. Ejemplos importantes:
 
@@ -710,110 +856,6 @@ El SDK expone cabeceras y tipos para muchos clusters que, desde un coordinador, 
 
 Ademas, si esta habilitado Green Power, existen APIs adicionales en `zgp/`.
 
-## 5. Nombres especiales y su significado
-
-- `APS`
-  Capa Application Support. Gestiona addressing, endpoints y confirmaciones APS.
-
-- `BDB`
-  Base Device Behavior. Conjunto de procedimientos de comisionamiento: formacion, steering, Touchlink y Finding & Binding.
-
-- `bind`
-  Asociacion entre un cluster origen y un destino para que un dispositivo envie mensajes a otro sin que la aplicacion haga routing manual cada vez.
-
-- `cluster`
-  Unidad funcional ZCL. Ejemplos: `On/Off`, `Temperature Measurement`, `IAS Zone`.
-
-- `cluster client`
-  Lado que consume un servicio o recibe ciertos comandos.
-
-- `cluster server`
-  Lado que expone atributos o implementa comandos del cluster.
-
-- `command direction`
-  Direccion logica del comando ZCL:
-  - `TO_SRV`
-  - `TO_CLI`
-
-- `device_id`
-  Identificador del tipo de dispositivo dentro de un perfil, declarado en el simple descriptor del endpoint.
-
-- `endpoint`
-  Identificador de una aplicacion Zigbee dentro del nodo. Un mismo dispositivo puede tener varios.
-
-- `Extended PAN ID`
-  Identificador de 64 bits de la red Zigbee.
-
-- `Finding & Binding`
-  Procedimiento BDB para localizar dispositivos compatibles y crear bindings.
-
-- `IEEE address`
-  Direccion larga de 64 bits, unica por dispositivo.
-
-- `LQI`
-  Link Quality Indicator. Estimacion de calidad de enlace.
-
-- `logical channel`
-  Canal Zigbee usado por la red. En 2.4 GHz suele estar entre 11 y 26.
-
-- `manufacturer code`
-  Codigo del fabricante que aparece, por ejemplo, en node descriptor o en comandos manufacturer-specific.
-
-- `match descriptor`
-  Consulta ZDO para encontrar nodos/endpoints que soportan cierto perfil y conjuntos de clusters.
-
-- `NWK address` o `short address`
-  Direccion corta de 16 bits asignada dentro de la red.
-
-- `node descriptor`
-  Descriptor ZDO del nodo completo: capacidades MAC, fabricante, tamanos maximos de transferencia, server mask, etc.
-
-- `PAN ID`
-  Identificador corto de red de 16 bits.
-
-- `permit join`
-  Estado que determina si la red o un router aceptan nuevos joins.
-
-- `power descriptor`
-  Descriptor ZDO con informacion de alimentacion y modo de consumo del nodo.
-
-- `profile ID`
-  Perfil de aplicacion. Ejemplos:
-  - `0x0000` para ZDO
-  - `0x0104` para Home Automation
-  - `0x0109` para Smart Energy
-  - `0xC05E` para ZLL
-  - `0xA1E0` para Green Power
-
-- `reportable change`
-  Umbral de cambio usado por `Configure Reporting` para que un atributo analogico decida si debe informar.
-
-- `RSSI`
-  Nivel de senal recibido. En callbacks ZCL aparece en `esp_zb_zcl_frame_header_t`.
-
-- `server mask`
-  Bitmap del node descriptor que indica roles especiales del nodo, por ejemplo `Trust Center` o `Network Manager`.
-
-- `simple descriptor`
-  Descriptor de un endpoint: perfil, device ID, version, lista de input clusters y output clusters.
-
-- `TC` o `Trust Center`
-  Autoridad de seguridad de la red Zigbee. En una red clasica, el coordinador centralizado suele ejercer ese papel.
-
-- `TSN`
-  Transaction Sequence Number. Numero de secuencia de transaccion ZCL.
-
-- `unbind`
-  Eliminacion de una entrada de binding.
-
-- `ZCL`
-  Zigbee Cluster Library. Define atributos, comandos y clusters de aplicacion.
-
-- `ZDO`
-  Zigbee Device Object. Define discovery, descriptors, management y senales del stack.
-
-- `ZDP`
-  Zigbee Device Profile. Perfil usado por ZDO, incluyendo estados y respuestas ZDP.
 ## 6. Como modelar un dispositivo Zigbee en la aplicacion
 
 ### 6.1 Idea central
@@ -1060,7 +1102,382 @@ Estas listas son opcionales porque no todos los coordinadores necesitan mantener
 
 En la aplicacion, la clave primaria real del nodo debe ser `ieee_addr`. El `nwk_addr` debe tratarse como un atributo mutable.
 
-## 7. Recomendaciones para no saturar la red
+## 7. Persistencia del stack, cache y `zb_storage`
+
+Esta es una distincion importante:
+
+- el stack Zigbee mantiene estado interno propio;
+- parte de ese estado puede persistirse entre reinicios;
+- y, aparte, la aplicacion puede mantener su propia cache o base de datos de nodos.
+
+Las tres cosas no son lo mismo.
+
+### 7.1 Que es `zb_storage`
+
+`zb_storage` es la particion de persistencia Zigbee del stack. La API oficial la menciona explicitamente en `esp_zb_factory_reset()`: el `factory reset` borra completamente `zb_storage` y reinicia el dispositivo.
+
+Desde la perspectiva de la aplicacion, lo importante es esto:
+
+- si `zb_storage` se conserva, el stack puede arrancar con contexto previo de red;
+- si `zb_storage` se borra, el stack vuelve a un estado equivalente a no tener persistencia Zigbee previa;
+- la estructura exacta interna de `zb_storage` no debe considerarse parte del contrato publico de alto nivel.
+
+En otras palabras, la aplicacion debe pensar en `zb_storage` como "la persistencia interna del stack Zigbee", no como una base de datos propia que pueda interpretar libremente.
+
+### 7.2 Que persiste el stack y que no conviene asumir
+
+La documentacion publica dice que en `autostart` el stack carga parametros desde NVRAM y procede con el arranque, que puede implicar:
+
+- `formation` para coordinador;
+- `join` o `rejoin` segun el rol y el estado previo.
+
+Por tanto, si `zb_storage` sigue intacta, es razonable esperar que el stack conserve al menos el estado persistente necesario para:
+
+- saber si el nodo ya pertenecia a una red;
+- reanudar o reconstruir el contexto de arranque de esa red;
+- continuar con seguridad y parametros Zigbee persistentes.
+
+Lo que no conviene asumir como contrato publico estable es el detalle exacto de bajo nivel:
+
+- formato binario interno;
+- claves internas concretas;
+- disposicion exacta de tablas internas;
+- o que una version futura del stack persista exactamente el mismo conjunto de estructuras.
+
+Para la aplicacion, la regla sana es:
+
+- confiar en el comportamiento observable del stack;
+- no depender del layout interno de `zb_storage`;
+- y persistir por separado cualquier dato de negocio propio.
+
+### 7.3 Cache interna del stack frente a cache de la aplicacion
+
+Cuando en este documento se habla de "cache", hay dos sentidos distintos.
+
+#### Cache o estado interno del stack
+
+El stack mantiene estado interno en RAM mientras esta ejecutandose, por ejemplo:
+
+- scheduler y buffer pool;
+- contexto de red activo;
+- tablas y estructuras internas de Zigbee;
+- estado transitorio de commissioning, routing, seguridad y entrega de mensajes.
+
+Ese estado en RAM no debe confundirse con la persistencia de `zb_storage`.
+
+Tras un reinicio:
+
+- la RAM del stack desaparece;
+- el stack vuelve a inicializar scheduler, buffers y estructuras de ejecucion;
+- y despues carga, si existe, el estado persistente de NVRAM/`zb_storage`.
+
+Es decir:
+
+- la cache RAM del stack es volatil;
+- `zb_storage` es persistente;
+- y ambos juntos explican por que un coordinador puede "recordar la red" tras reiniciar aunque toda la RAM anterior ya no exista.
+
+#### Cache de la aplicacion
+
+La aplicacion puede mantener su propia cache, por ejemplo:
+
+- lista de nodos por `ieee_addr`;
+- descriptores descubiertos;
+- atributos leidos o reportados;
+- timestamps de actividad;
+- clasificacion funcional del dispositivo;
+- datos de negocio o integracion externa.
+
+Esa cache no la gestiona el stack por ti.
+
+Si la aplicacion no la persiste por su cuenta:
+
+- se pierde al reiniciar el coordinador;
+- aunque el stack siga pudiendo reanudar la red gracias a `zb_storage`.
+
+Esa diferencia explica situaciones como esta:
+
+- el coordinador reinicia;
+- el stack reentra correctamente en la red;
+- pero la app aun no ha reconstruido su modelo RAM de un dispositivo concreto;
+- y el primer mensaje que recibe de ese nodo puede ser directamente un report ZCL.
+
+### 7.4 `zb_storage`, `zb_fct` y configuracion de fabricacion
+
+La API oficial tambien menciona `zb_fct` al hablar de seleccion de canales:
+
+- si no se fija explicitamente la mascara de canales primaria, el stack puede escanear todos los canales permitidos;
+- o leer configuracion de la zona NVRAM `zb_fct` si existe.
+
+Conviene distinguir ambas zonas conceptualmente:
+
+- `zb_storage`
+  Persistencia operativa del stack Zigbee en ejecucion real.
+
+- `zb_fct`
+  Zona asociada a configuracion de fabricacion o parametros preinyectados.
+
+No cumplen el mismo papel:
+
+- `zb_storage` guarda estado de funcionamiento Zigbee entre reinicios;
+- `zb_fct` sirve como fuente de configuracion de fabrica cuando procede.
+
+### 7.5 Escenarios tipicos de arranque respecto a la persistencia
+
+#### Arranque limpio sin estado previo
+
+Si no hay estado util en `zb_storage`:
+
+- el stack arranca sin contexto de red previo;
+- la aplicacion suele iniciar `BDB` de formacion en un coordinador;
+- y la red se crea de nuevo.
+
+#### Reinicio con `zb_storage` intacta
+
+Si `zb_storage` sigue presente:
+
+- el stack puede cargar parametros persistidos al arrancar;
+- el coordinador puede reanudar su pertenencia a la red;
+- y la aplicacion recibira senales compatibles con esa reanudacion, como `DEVICE_REBOOT` o flujos equivalentes segun el caso.
+
+#### `local reset`
+
+`esp_zb_bdb_reset_via_local_action()`:
+
+- hace que el dispositivo abandone la red actual;
+- limpia los datos Zigbee persistentes;
+- pero conserva el contador saliente NWK segun la nota oficial de la API;
+- y deja el nodo en un estado casi de fabrica.
+
+#### `factory reset`
+
+`esp_zb_factory_reset()`:
+
+- borra completamente `zb_storage`;
+- reinicia el dispositivo;
+- y obliga a tratar el siguiente arranque como un arranque sin persistencia Zigbee previa.
+
+#### Borrado forzado al arrancar
+
+La API oficial expone `esp_zb_nvram_erase_at_start(true)`.
+
+Eso significa:
+
+- borrar `zb_storage` en cada arranque antes de que el stack empiece;
+- lo que equivale, en la practica, a impedir que el stack reutilice persistencia Zigbee previa;
+- y es algo util para pruebas, pero normalmente no para un coordinador que deba mantener continuidad de red.
+
+### 7.6 Implicaciones practicas para la aplicacion
+
+- No confundas "el stack recuerda la red" con "la aplicacion recuerda los dispositivos".
+
+- Si quieres conservar tu modelo de nodos, debes persistirlo aparte.
+
+- No dependas del contenido binario de `zb_storage` como API publica.
+
+- Si borras `zb_storage`, debes asumir:
+  - perdida de continuidad Zigbee a nivel stack;
+  - nueva formacion o nuevo proceso de red segun el rol;
+  - y reconstruccion completa de la vision de red de la aplicacion.
+
+- Si mantienes `zb_storage` pero no tu cache de aplicacion, debes asumir:
+  - continuidad de red razonable a nivel Zigbee;
+  - pero reconstruccion parcial o total del inventario RAM de nodos desde mensajes entrantes y consultas ZDO/ZCL.
+
+## 8. Ejemplos de secuencias de mensajes
+
+Estas secuencias son ejemplos tipicos y pedagogicos. El orden exacto puede variar segun el dispositivo remoto, el padre al que se asocie, si ya habia cache local, si hay reporting configurado y el modo de seguridad de la red.
+
+### 8.1 Dispositivo nuevo que nunca ha estado en la red y se va a unir
+
+Supongamos un sensor de temperatura factory-new que nunca ha pertenecido a esta red.
+
+1. Coordinador -> red
+   `esp_zb_bdb_open_network()` o `esp_zb_zdo_permit_joining_req()` para permitir joins.
+
+2. Dispositivo -> red
+   Busca una red compatible y solicita unirse.
+
+3. Coordinador <- stack
+   Puede aparecer `ESP_ZB_NWK_SIGNAL_DEVICE_ASSOCIATED`.
+
+4. Coordinador <- stack
+   Puede aparecer `ESP_ZB_ZDO_SIGNAL_DEVICE_AUTHORIZED` cuando el Trust Center completa la autorizacion.
+
+5. Coordinador <- stack
+   Aparece `ESP_ZB_ZDO_SIGNAL_DEVICE_UPDATE` con estado de join o rejoin inicial.
+
+6. Dispositivo -> coordinador
+   Envia `Device_annce`.
+
+7. Coordinador <- stack
+   Aparece `ESP_ZB_ZDO_SIGNAL_DEVICE_ANNCE` con:
+   - `device_short_addr`
+   - `ieee_addr`
+   - `capability`
+
+8. Coordinador -> dispositivo
+   `esp_zb_zdo_node_desc_req()`
+
+9. Dispositivo -> coordinador
+   Respuesta en `esp_zb_zdo_node_desc_callback_t` con `esp_zb_af_node_desc_t`.
+
+10. Coordinador -> dispositivo
+    `esp_zb_zdo_active_ep_req()`
+
+11. Dispositivo -> coordinador
+    Respuesta en `esp_zb_zdo_active_ep_callback_t` con la lista de endpoints.
+
+12. Coordinador -> dispositivo
+    `esp_zb_zdo_simple_desc_req()` por cada endpoint de interes.
+
+13. Dispositivo -> coordinador
+    Respuesta en `esp_zb_zdo_simple_desc_callback_t` con perfil, device ID y clusters.
+
+14. Coordinador -> dispositivo
+    `esp_zb_zcl_read_attr_cmd_req()` para leer atributos de identidad o telemetria inicial, por ejemplo de `Basic` o `Temperature Measurement`.
+
+15. Dispositivo -> coordinador
+    `ESP_ZB_CORE_CMD_READ_ATTR_RESP_CB_ID`.
+
+16. Coordinador -> dispositivo
+    `esp_zb_zcl_config_report_cmd_req()` para pedir reporting de temperatura si el cluster lo soporta.
+
+17. Dispositivo -> coordinador
+    `ESP_ZB_CORE_CMD_REPORT_CONFIG_RESP_CB_ID`.
+
+Desde ese punto, el nodo ya puede pasar a regimen normal de reports.
+
+### 8.2 Dispositivo que ha pasado horas fuera de la red
+
+Supongamos un nodo que pertenecia a la red, pero ha estado apagado o fuera de alcance durante horas y vuelve.
+
+1. Dispositivo -> red
+   Intenta rejoin a la red conocida.
+
+2. Coordinador <- stack
+   Suele aparecer `ESP_ZB_ZDO_SIGNAL_DEVICE_UPDATE` con un estado de rejoin, por ejemplo:
+   - `ESP_ZB_ZDO_STANDARD_DEV_SECURED_REJOIN`
+   - o `ESP_ZB_ZDO_STANDARD_DEV_TC_REJOIN`
+
+3. Dispositivo -> coordinador
+   Puede enviar tambien `Device_annce`.
+
+4. Coordinador <- stack
+   Puede aparecer `ESP_ZB_ZDO_SIGNAL_DEVICE_ANNCE`.
+
+5. Coordinador -> dispositivo
+   Si ya conoce `ieee_addr`, `endpoints` y clusters, no necesita rehacer siempre toda la entrevista.
+   Puede optar por una de estas politicas:
+   - entrevista ligera: `node_desc_req` o `active_ep_req`
+   - verificacion minima: `Read Attributes` de algun atributo conocido
+   - ninguna entrevista inmediata y esperar al siguiente trafico ZCL
+
+6. Si la aplicacion sospecha cambio de topologia o de direccion
+   Puede emitir:
+   - `esp_zb_zdo_node_desc_req()`
+   - `esp_zb_zdo_active_ep_req()`
+   - `esp_zb_zdo_simple_desc_req()`
+   - o `esp_zb_zdo_mgmt_lqi_req()` para diagnostico
+
+7. Dispositivo -> coordinador
+   Reanuda sus reports o responde a lecturas.
+
+La idea importante en este caso es que un rejoin no obliga a tratar el nodo como totalmente nuevo si la aplicacion ya conserva su identidad y su modelo.
+
+### 8.3 Dispositivo de temperatura que reporta un cambio de temperatura
+
+Supongamos que el coordinador ya configuro reporting sobre `Temperature Measurement`.
+
+1. En un momento anterior
+   El coordinador envio `esp_zb_zcl_config_report_cmd_req()` para el atributo `MeasuredValue`.
+
+2. Dispositivo -> coordinador
+   Cuando el valor cambia lo suficiente o expira el `max_interval`, envia un `Report Attributes`.
+
+3. Coordinador <- stack
+   El mensaje entra por `ESP_ZB_CORE_REPORT_ATTR_CB_ID` con `esp_zb_zcl_report_attr_message_t`.
+
+4. La aplicacion extrae del mensaje
+   - direccion origen
+   - endpoint origen
+   - cluster `Temperature Measurement`
+   - atributo `MeasuredValue`
+   - tipo y valor
+   - metadatos como `TSN` o `RSSI` si los necesita
+
+5. La aplicacion actualiza su cache local
+   - valor de temperatura
+   - `last_seen`
+   - calidad de enlace si la mantiene
+
+6. Opcionalmente, coordinador -> dispositivo
+   Si detecta incoherencia, puede lanzar un `esp_zb_zcl_read_attr_cmd_req()` para confirmar el valor.
+
+7. Dispositivo -> coordinador
+   Llegaria `ESP_ZB_CORE_CMD_READ_ATTR_RESP_CB_ID`.
+
+En operacion normal, para un sensor bien configurado, el camino habitual es el paso 2 -> 3 -> 5, sin polling constante.
+
+### 8.4 Switch que cambia de estado y el coordinador acaba de arrancar sin haber oido aun a ese dispositivo
+
+Supongamos que el coordinador se ha reiniciado, ha restaurado la red, pero su RAM de aplicacion todavia no ha visto trafico de ese switch concreto.
+
+1. Coordinador <- stack
+   Tras arrancar, el coordinador recupera la red con `ESP_ZB_BDB_SIGNAL_DEVICE_REBOOT` o flujo equivalente.
+
+2. El switch ya pertenece a la red
+   Pero el coordinador todavia no lo ha vuelto a descubrir en esta sesion.
+
+3. El switch cambia de estado local
+   Por ejemplo de `OFF` a `ON`.
+
+4. Dispositivo -> coordinador
+   Si el switch implementa reporting del atributo `OnOff`, envia un `Report Attributes`.
+
+5. Coordinador <- stack
+   El primer mensaje que la aplicacion recibe de ese nodo puede ser directamente `ESP_ZB_CORE_REPORT_ATTR_CB_ID`, aunque todavia no haya recibido un `DEVICE_ANNCE` reciente de ese dispositivo.
+
+6. La aplicacion observa
+   - `src_address` corto
+   - endpoint origen
+   - cluster `On/Off`
+   - atributo `OnOff`
+   - nuevo valor
+
+7. Como el nodo aun no esta en la cache de aplicacion de esta sesion
+   El coordinador puede iniciar resolucion e entrevista a posteriori:
+   - `esp_zb_zdo_ieee_addr_req()` para fijar identidad estable
+   - `esp_zb_zdo_node_desc_req()`
+   - `esp_zb_zdo_active_ep_req()`
+   - `esp_zb_zdo_simple_desc_req()`
+
+8. Dispositivo -> coordinador
+   Va respondiendo en los callbacks ZDO correspondientes.
+
+9. Coordinador -> dispositivo
+   Si necesita confirmar estado o identidad funcional, puede enviar `esp_zb_zcl_read_attr_cmd_req()` sobre `OnOff` o `Basic`.
+
+10. Dispositivo -> coordinador
+    Responde via `ESP_ZB_CORE_CMD_READ_ATTR_RESP_CB_ID`.
+
+La ensenanza principal de este ejemplo es que el primer mensaje util de un nodo no tiene por que ser `DEVICE_ANNCE`. Un coordinador puede recibir primero un mensaje ZCL y, a partir de ahi, decidir descubrir ese dispositivo.
+
+### 8.5 Variante importante para switches basados en comandos y no en reporting
+
+Muchos dispositivos tipo pulsador o mando no reportan un atributo `OnOff`, sino que envian comandos ZCL como `On`, `Off` o `Toggle` hacia sus destinos enlazados.
+
+En ese caso, la secuencia cambia asi:
+
+1. El switch cambia de estado o el usuario pulsa una tecla.
+2. Dispositivo -> coordinador
+   Envia un comando ZCL del cluster `On/Off`.
+3. Coordinador <- stack
+   El primer mensaje entra por el callback ZCL de comando aplicable, no por `ESP_ZB_CORE_REPORT_ATTR_CB_ID`.
+4. Si la app no conoce aun ese nodo en RAM
+   Puede igualmente lanzar `ieee_addr_req`, `node_desc_req`, `active_ep_req` y `simple_desc_req` para incorporarlo a su modelo.
+
+## 9. Recomendaciones para no saturar la red
 
 Estas recomendaciones no dependen de un firmware concreto. Son practicas de arquitectura y operacion utiles para cualquier coordinador.
 
@@ -1115,7 +1532,7 @@ Estas recomendaciones no dependen de un firmware concreto. Son practicas de arqu
 - Mide antes de afinar.
   Cuenta `read ok/fail`, `report ok/fail`, latencia ZDO/ZCL, LQI y frecuencia de rejoins. Sin esas metricas es facil optimizar en la direccion equivocada.
 
-## 8. Criterio practico para una app coordinador
+## 10. Criterio practico para una app coordinador
 
 Una estrategia robusta y muy general para usar el stack oficial es:
 
@@ -1130,7 +1547,7 @@ Una estrategia robusta y muy general para usar el stack oficial es:
 9. Reintentar con backoff y jitter.
 10. Usar `Mgmt_Lqi` y `Mgmt_NWK_Update` solo como diagnostico o administracion.
 
-## 9. Fuentes oficiales
+## 11. Fuentes oficiales
 
 - Headers oficiales del componente:
   - `managed_components/espressif__esp-zigbee-lib/include/esp_zigbee_core.h`
@@ -1146,3 +1563,4 @@ Una estrategia robusta y muy general para usar el stack oficial es:
 - Documentacion oficial de Espressif:
   - <https://docs.espressif.com/projects/esp-zigbee-sdk/en/latest/esp32c6/api-reference/zcl/index.html>
   - <https://docs.espressif.com/projects/esp-zigbee-sdk/en/latest/esp32c3/api-reference/zdo/esp_zigbee_zdo_command.html>
+
