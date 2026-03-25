@@ -162,6 +162,8 @@ void device_table_note_latency(bool is_zdo, double latency_ms);
 void device_table_inc_counter(const char *counter_name);
 void device_table_get_telemetry(device_table_telemetry_t *out);
 void device_table_get_network_summary(device_table_network_summary_t *out);
+size_t device_table_copy_devices(device_record_t *out, size_t max_out);
+bool device_table_copy_device_at(size_t slot, device_record_t *out);
 size_t device_table_get_known_short_addrs(uint16_t *out, size_t max_out);
 bool device_table_has_short_addr(uint16_t short_addr);
 /** @return true si el valor de lectura cambio (o es la primera vez); false si sin cambio o entrada invalida. */

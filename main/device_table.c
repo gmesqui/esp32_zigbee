@@ -7,6 +7,8 @@
 
 #include "esp_err.h"
 #include "esp_log.h"
+#include "freertos/FreeRTOS.h"
+#include "freertos/semphr.h"
 #include "nvs.h"
 #include "timebase.h"
 
@@ -28,10 +30,24 @@ static char s_cache_nvs_format[20] = "none";
 static bool s_cache_dirty = false;
 static double s_cache_last_dirty_s = 0.0;
 static uint32_t s_cache_flash_write_count = 0;
+static uint32_t s_cache_dirty_generation = 0;
+static SemaphoreHandle_t s_device_table_mutex = NULL;
 static void update_norm_type(device_record_t *rec);
 static bool push_unique_u16(uint16_t *arr, size_t *len, size_t max, uint16_t v);
 static device_endpoint_record_t *find_endpoint(device_record_t *rec, uint8_t endpoint_id);
 static device_endpoint_record_t *get_or_create_endpoint(device_record_t *rec, uint8_t endpoint_id);
+
+static bool device_table_lock(void)
+{
+    return (s_device_table_mutex == NULL) || (xSemaphoreTakeRecursive(s_device_table_mutex, portMAX_DELAY) == pdTRUE);
+}
+
+static void device_table_unlock(void)
+{
+    if (s_device_table_mutex != NULL) {
+        (void)xSemaphoreGiveRecursive(s_device_table_mutex);
+    }
+}
 
 typedef struct {
     bool used;
@@ -72,6 +88,7 @@ static void mark_cache_dirty(void)
 {
     s_cache_dirty = true;
     s_cache_last_dirty_s = timebase_now_s();
+    s_cache_dirty_generation++;
 }
 
 static void clear_device_record(device_record_t *rec)
@@ -558,11 +575,22 @@ static void update_norm_type(device_record_t *rec)
 
 void device_table_init(void)
 {
+    if (s_device_table_mutex == NULL) {
+        s_device_table_mutex = xSemaphoreCreateRecursiveMutex();
+        if (s_device_table_mutex == NULL) {
+            ESP_LOGE(TAG, "[T+%07.3f] No se pudo crear mutex de device_table; se continua sin proteccion", timebase_now_s());
+        }
+    }
+    if (!device_table_lock()) {
+        ESP_LOGE(TAG, "[T+%07.3f] No se pudo bloquear device_table_init", timebase_now_s());
+        return;
+    }
     memset(s_devices, 0, sizeof(s_devices));
     memset(&s_telemetry, 0, sizeof(s_telemetry));
     s_cache_loaded = false;
     s_cache_dirty = false;
     s_cache_last_dirty_s = 0.0;
+    s_cache_dirty_generation = 0;
     snprintf(s_cache_nvs_format, sizeof(s_cache_nvs_format), "none");
     ESP_LOGI(TAG, "[T+%07.3f] Cache minima NVS: record=%u B chunk=%u B reservado_max=%u B slots=%u", timebase_now_s(),
              (unsigned)sizeof(device_cache_record_t), (unsigned)sizeof(s_chunk_scratch), (unsigned)cache_payload_reserved_bytes(),
@@ -572,10 +600,12 @@ void device_table_init(void)
     esp_err_t err = nvs_open(CACHE_NS, NVS_READONLY, &nvs);
     if (err == ESP_ERR_NVS_NOT_FOUND) {
         ESP_LOGW(TAG, "[T+%07.3f] NVS namespace '%s' inexistente (primer arranque o sin guardados previos)", timebase_now_s(), CACHE_NS);
+        device_table_unlock();
         return;
     }
     if (err != ESP_OK) {
         ESP_LOGE(TAG, "[T+%07.3f] NVS nvs_open RO '%s' fallo: %s", timebase_now_s(), CACHE_NS, esp_err_to_name(err));
+        device_table_unlock();
         return;
     }
 
@@ -583,6 +613,7 @@ void device_table_init(void)
         ESP_LOGI(TAG, "[T+%07.3f] NVS sin cache minima valida", timebase_now_s());
     }
     nvs_close(nvs);
+    device_table_unlock();
 }
 
 void device_table_clear_cache_and_runtime(void)
@@ -619,18 +650,27 @@ void device_table_clear_cache_and_runtime(void)
         ESP_LOGW(TAG, "[T+%07.3f] NVS open '%s' para borrado fallo: %s", timebase_now_s(), CACHE_NS, esp_err_to_name(err));
     }
 
+    if (!device_table_lock()) {
+        ESP_LOGE(TAG, "[T+%07.3f] No se pudo bloquear device_table_clear_cache_and_runtime", timebase_now_s());
+        return;
+    }
     memset(s_devices, 0, sizeof(s_devices));
     memset(&s_telemetry, 0, sizeof(s_telemetry));
     s_cache_loaded = false;
     s_cache_dirty = false;
     s_cache_last_dirty_s = 0.0;
     s_cache_flash_write_count = 0;
+    s_cache_dirty_generation = 0;
     snprintf(s_cache_nvs_format, sizeof(s_cache_nvs_format), "none");
+    device_table_unlock();
     ESP_LOGW(TAG, "[T+%07.3f] Cache zb_cache borrada y estado RAM reiniciado", timebase_now_s());
 }
 
 void device_table_touch(uint64_t ieee, uint16_t short_addr, int8_t rssi, uint8_t lqi)
 {
+    if (!device_table_lock()) {
+        return;
+    }
     const bool existed = (find_by_ieee(ieee) != NULL);
     device_record_t *rec = ensure_device(ieee);
     rec->in_network = true;
@@ -641,10 +681,14 @@ void device_table_touch(uint64_t ieee, uint16_t short_addr, int8_t rssi, uint8_t
     if (!existed) {
         mark_cache_dirty();
     }
+    device_table_unlock();
 }
 
 void device_table_update_discovery(uint64_t ieee, uint16_t short_addr, uint16_t device_id, const char *manufacturer, const char *model)
 {
+    if (!device_table_lock()) {
+        return;
+    }
     const bool existed = (find_by_ieee(ieee) != NULL);
     device_record_t *rec = ensure_device(ieee);
     bool persist_changed = !existed;
@@ -671,6 +715,7 @@ void device_table_update_discovery(uint64_t ieee, uint16_t short_addr, uint16_t 
     if (persist_changed) {
         mark_cache_dirty();
     }
+    device_table_unlock();
 }
 
 void device_table_update_from_trace(const zb_trace_meta_t *meta)
@@ -678,30 +723,44 @@ void device_table_update_from_trace(const zb_trace_meta_t *meta)
     if (meta == NULL) {
         return;
     }
+    if (!device_table_lock()) {
+        return;
+    }
     device_record_t *rec = find_by_short(meta->src_short);
     if (rec == NULL) {
+        device_table_unlock();
         return;
     }
     rec->rssi = meta->rssi;
     rec->lqi = meta->lqi;
     rec->last_seen_s = timebase_now_s();
+    device_table_unlock();
 }
 
 void device_table_update_rf_metrics(uint16_t short_addr, int8_t rssi, uint8_t lqi)
 {
+    if (!device_table_lock()) {
+        return;
+    }
     device_record_t *rec = find_by_short(short_addr);
     if (rec == NULL) {
+        device_table_unlock();
         return;
     }
     rec->rssi = rssi;
     rec->lqi = lqi;
     rec->last_seen_s = timebase_now_s();
+    device_table_unlock();
 }
 
 void device_table_update_identity(uint16_t short_addr, const char *manufacturer, const char *model)
 {
+    if (!device_table_lock()) {
+        return;
+    }
     device_record_t *rec = find_by_short(short_addr);
     if (rec == NULL) {
+        device_table_unlock();
         return;
     }
     bool persist_changed = false;
@@ -717,14 +776,19 @@ void device_table_update_identity(uint16_t short_addr, const char *manufacturer,
     if (persist_changed) {
         mark_cache_dirty();
     }
+    device_table_unlock();
 }
 
 void device_table_update_node_desc(uint16_t short_addr, uint16_t node_desc_flags, uint8_t mac_capability_flags, uint16_t manufacturer_code,
                                    uint8_t max_buf_size, uint16_t max_incoming_transfer_size, uint16_t server_mask,
                                    uint16_t max_outgoing_transfer_size, uint8_t desc_capability_field)
 {
+    if (!device_table_lock()) {
+        return;
+    }
     device_record_t *rec = find_by_short(short_addr);
     if (rec == NULL) {
+        device_table_unlock();
         return;
     }
     rec->last_seen_s = timebase_now_s();
@@ -736,19 +800,25 @@ void device_table_update_node_desc(uint16_t short_addr, uint16_t node_desc_flags
     rec->server_mask = server_mask;
     rec->max_outgoing_transfer_size = max_outgoing_transfer_size;
     rec->desc_capability_field = desc_capability_field;
+    device_table_unlock();
 }
 
 void device_table_update_simple_desc(uint16_t short_addr, uint8_t endpoint, uint16_t profile_id, uint16_t device_id, uint8_t device_version,
                                      const uint16_t *clusters_in, size_t clusters_in_len, const uint16_t *clusters_out,
                                      size_t clusters_out_len)
 {
+    if (!device_table_lock()) {
+        return;
+    }
     device_record_t *rec = find_by_short(short_addr);
     if (rec == NULL) {
+        device_table_unlock();
         return;
     }
 
     device_endpoint_record_t *ep = get_or_create_endpoint(rec, endpoint);
     if (ep == NULL) {
+        device_table_unlock();
         return;
     }
 
@@ -770,10 +840,14 @@ void device_table_update_simple_desc(uint16_t short_addr, uint8_t endpoint, uint
     rec->last_seen_s = timebase_now_s();
     update_norm_type(rec);
     mark_cache_dirty();
+    device_table_unlock();
 }
 
 void device_table_update_device_update(uint64_t ieee, uint16_t short_addr, uint16_t parent_short, uint8_t status, uint8_t tc_action)
 {
+    if (!device_table_lock()) {
+        return;
+    }
     device_record_t *rec = ensure_device(ieee);
     rec->in_network = true;
     rec->short_addr = short_addr;
@@ -781,10 +855,14 @@ void device_table_update_device_update(uint64_t ieee, uint16_t short_addr, uint1
     rec->update_status = status;
     rec->tc_action = tc_action;
     rec->last_seen_s = timebase_now_s();
+    device_table_unlock();
 }
 
 void device_table_update_authorization(uint64_t ieee, uint16_t short_addr, uint8_t authorization_type, uint8_t authorization_status)
 {
+    if (!device_table_lock()) {
+        return;
+    }
     device_record_t *rec = ensure_device(ieee);
     rec->in_network = true;
     rec->short_addr = short_addr;
@@ -792,10 +870,14 @@ void device_table_update_authorization(uint64_t ieee, uint16_t short_addr, uint8
     rec->authorization_type = authorization_type;
     rec->authorization_status = authorization_status;
     rec->last_seen_s = timebase_now_s();
+    device_table_unlock();
 }
 
 void device_table_mark_leave(uint64_t ieee, uint16_t short_addr, bool rejoin)
 {
+    if (!device_table_lock()) {
+        return;
+    }
     device_record_t *rec = NULL;
     if (ieee != 0U) {
         rec = find_by_ieee(ieee);
@@ -804,6 +886,7 @@ void device_table_mark_leave(uint64_t ieee, uint16_t short_addr, bool rejoin)
         rec = find_by_short(short_addr);
     }
     if (rec == NULL) {
+        device_table_unlock();
         return;
     }
     rec->in_network = rejoin;
@@ -812,12 +895,17 @@ void device_table_mark_leave(uint64_t ieee, uint16_t short_addr, bool rejoin)
     rec->silent = !rejoin;
     rec->silence_level = rejoin ? 1U : 2U;
     rec->last_seen_s = timebase_now_s();
+    device_table_unlock();
 }
 
 void device_table_mark_interview(uint16_t short_addr, uint8_t phase, bool success, bool is_retry)
 {
+    if (!device_table_lock()) {
+        return;
+    }
     device_record_t *rec = find_by_short(short_addr);
     if (rec == NULL) {
+        device_table_unlock();
         return;
     }
     rec->interview_phase = phase;
@@ -834,12 +922,17 @@ void device_table_mark_interview(uint16_t short_addr, uint8_t phase, bool succes
     } else if (phase == 0xFFU) {
         s_telemetry.interview_failed++;
     }
+    device_table_unlock();
 }
 
 void device_table_mark_report_cfg(uint16_t short_addr, bool success, bool is_retry)
 {
+    if (!device_table_lock()) {
+        return;
+    }
     device_record_t *rec = find_by_short(short_addr);
     if (rec == NULL) {
+        device_table_unlock();
         return;
     }
     rec->last_report_cfg_s = timebase_now_s();
@@ -847,12 +940,17 @@ void device_table_mark_report_cfg(uint16_t short_addr, bool success, bool is_ret
         rec->report_cfg_retries++;
     }
     rec->report_cfg_ok = success;
+    device_table_unlock();
 }
 
 void device_table_mark_silent(uint16_t short_addr, bool silent)
 {
+    if (!device_table_lock()) {
+        return;
+    }
     device_record_t *rec = find_by_short(short_addr);
     if (rec == NULL) {
+        device_table_unlock();
         return;
     }
     rec->silent = silent;
@@ -861,12 +959,17 @@ void device_table_mark_silent(uint16_t short_addr, bool silent)
     } else if (rec->silence_level == 0) {
         rec->silence_level = 1;
     }
+    device_table_unlock();
 }
 
 void device_table_mark_absent_prolonged(uint16_t short_addr, bool absent)
 {
+    if (!device_table_lock()) {
+        return;
+    }
     device_record_t *rec = find_by_short(short_addr);
     if (rec == NULL) {
+        device_table_unlock();
         return;
     }
     if (absent) {
@@ -875,11 +978,15 @@ void device_table_mark_absent_prolonged(uint16_t short_addr, bool absent)
     } else if (rec->silence_level == 2) {
         rec->silence_level = 1;
     }
+    device_table_unlock();
 }
 
 void device_table_note_latency(bool is_zdo, double latency_ms)
 {
     if (latency_ms < 0.0) {
+        return;
+    }
+    if (!device_table_lock()) {
         return;
     }
     if (is_zdo) {
@@ -891,11 +998,15 @@ void device_table_note_latency(bool is_zdo, double latency_ms)
             ((s_telemetry.zcl_latency_avg_ms * s_telemetry.zcl_latency_samples) + latency_ms) / (s_telemetry.zcl_latency_samples + 1U);
         s_telemetry.zcl_latency_samples++;
     }
+    device_table_unlock();
 }
 
 void device_table_inc_counter(const char *counter_name)
 {
     if (counter_name == NULL) {
+        return;
+    }
+    if (!device_table_lock()) {
         return;
     }
     if (strcmp(counter_name, "device_announce") == 0) {
@@ -923,6 +1034,7 @@ void device_table_inc_counter(const char *counter_name)
     } else if (strcmp(counter_name, "reinterview") == 0) {
         s_telemetry.reinterviews++;
     }
+    device_table_unlock();
 }
 
 void device_table_get_telemetry(device_table_telemetry_t *out)
@@ -930,12 +1042,21 @@ void device_table_get_telemetry(device_table_telemetry_t *out)
     if (out == NULL) {
         return;
     }
+    if (!device_table_lock()) {
+        memset(out, 0, sizeof(*out));
+        return;
+    }
     *out = s_telemetry;
+    device_table_unlock();
 }
 
 void device_table_get_network_summary(device_table_network_summary_t *out)
 {
     if (out == NULL) {
+        return;
+    }
+    if (!device_table_lock()) {
+        memset(out, 0, sizeof(*out));
         return;
     }
     memset(out, 0, sizeof(*out));
@@ -965,11 +1086,51 @@ void device_table_get_network_summary(device_table_network_summary_t *out)
             break;
         }
     }
+    device_table_unlock();
+}
+
+size_t device_table_copy_devices(device_record_t *out, size_t max_out)
+{
+    if (out == NULL || max_out == 0U) {
+        return 0U;
+    }
+    if (!device_table_lock()) {
+        return 0U;
+    }
+    size_t n = 0;
+    for (size_t i = 0; i < DEVICE_TABLE_MAX_DEVICES && n < max_out; ++i) {
+        if (!s_devices[i].occupied) {
+            continue;
+        }
+        out[n++] = s_devices[i];
+    }
+    device_table_unlock();
+    return n;
+}
+
+bool device_table_copy_device_at(size_t slot, device_record_t *out)
+{
+    if (out == NULL || slot >= DEVICE_TABLE_MAX_DEVICES) {
+        return false;
+    }
+    if (!device_table_lock()) {
+        return false;
+    }
+    if (!s_devices[slot].occupied) {
+        device_table_unlock();
+        return false;
+    }
+    *out = s_devices[slot];
+    device_table_unlock();
+    return true;
 }
 
 size_t device_table_get_known_short_addrs(uint16_t *out, size_t max_out)
 {
     if (out == NULL || max_out == 0) {
+        return 0;
+    }
+    if (!device_table_lock()) {
         return 0;
     }
     size_t n = 0;
@@ -983,12 +1144,18 @@ size_t device_table_get_known_short_addrs(uint16_t *out, size_t max_out)
         }
         out[n++] = d->short_addr;
     }
+    device_table_unlock();
     return n;
 }
 
 bool device_table_has_short_addr(uint16_t short_addr)
 {
-    return (find_by_short(short_addr) != NULL);
+    if (!device_table_lock()) {
+        return false;
+    }
+    const bool found = (find_by_short(short_addr) != NULL);
+    device_table_unlock();
+    return found;
 }
 
 static device_endpoint_record_t *find_endpoint_for_reading(uint16_t short_addr, uint8_t ep_id)
@@ -1012,156 +1179,214 @@ static void endpoint_readings_touch(device_record_t *rec, device_endpoint_record
 
 bool device_table_note_reading_temperature(uint16_t short_addr, uint8_t ep, int16_t value_0_01_c)
 {
+    if (!device_table_lock()) {
+        return false;
+    }
     device_record_t *rec = find_by_short(short_addr);
     device_endpoint_record_t *ep_rec = find_endpoint_for_reading(short_addr, ep);
     if (rec == NULL || ep_rec == NULL) {
+        device_table_unlock();
         return false;
     }
     if (value_0_01_c == (int16_t)0x8000) {
+        device_table_unlock();
         return false;
     }
     if (ep_rec->has_temperature && ep_rec->temperature_0_01_c == value_0_01_c) {
+        device_table_unlock();
         return false;
     }
     ep_rec->has_temperature = true;
     ep_rec->temperature_0_01_c = value_0_01_c;
     endpoint_readings_touch(rec, ep_rec);
+    device_table_unlock();
     return true;
 }
 
 bool device_table_note_reading_humidity(uint16_t short_addr, uint8_t ep, uint16_t value_0_01_pct)
 {
+    if (!device_table_lock()) {
+        return false;
+    }
     device_record_t *rec = find_by_short(short_addr);
     device_endpoint_record_t *ep_rec = find_endpoint_for_reading(short_addr, ep);
     if (rec == NULL || ep_rec == NULL) {
+        device_table_unlock();
         return false;
     }
     if (value_0_01_pct == 0xFFFFU) {
+        device_table_unlock();
         return false;
     }
     if (ep_rec->has_humidity && ep_rec->humidity_0_01_pct == value_0_01_pct) {
+        device_table_unlock();
         return false;
     }
     ep_rec->has_humidity = true;
     ep_rec->humidity_0_01_pct = value_0_01_pct;
     endpoint_readings_touch(rec, ep_rec);
+    device_table_unlock();
     return true;
 }
 
 bool device_table_note_reading_on_off(uint16_t short_addr, uint8_t ep, bool on)
 {
+    if (!device_table_lock()) {
+        return false;
+    }
     device_record_t *rec = find_by_short(short_addr);
     device_endpoint_record_t *ep_rec = find_endpoint_for_reading(short_addr, ep);
     if (rec == NULL || ep_rec == NULL) {
+        device_table_unlock();
         return false;
     }
     if (ep_rec->has_on_off && ep_rec->on_off == on) {
+        device_table_unlock();
         return false;
     }
     ep_rec->has_on_off = true;
     ep_rec->on_off = on;
     endpoint_readings_touch(rec, ep_rec);
+    device_table_unlock();
     return true;
 }
 
 bool device_table_note_reading_occupancy(uint16_t short_addr, uint8_t ep, uint8_t occupancy_bitmap)
 {
+    if (!device_table_lock()) {
+        return false;
+    }
     device_record_t *rec = find_by_short(short_addr);
     device_endpoint_record_t *ep_rec = find_endpoint_for_reading(short_addr, ep);
     if (rec == NULL || ep_rec == NULL) {
+        device_table_unlock();
         return false;
     }
     if (ep_rec->has_occupancy && ep_rec->occupancy_bitmap == occupancy_bitmap) {
+        device_table_unlock();
         return false;
     }
     ep_rec->has_occupancy = true;
     ep_rec->occupancy_bitmap = occupancy_bitmap;
     endpoint_readings_touch(rec, ep_rec);
+    device_table_unlock();
     return true;
 }
 
 bool device_table_note_reading_illuminance(uint16_t short_addr, uint8_t ep, uint16_t measured_value_raw)
 {
+    if (!device_table_lock()) {
+        return false;
+    }
     device_record_t *rec = find_by_short(short_addr);
     device_endpoint_record_t *ep_rec = find_endpoint_for_reading(short_addr, ep);
     if (rec == NULL || ep_rec == NULL) {
+        device_table_unlock();
         return false;
     }
     if (measured_value_raw == 0xFFFFU) {
+        device_table_unlock();
         return false;
     }
     if (ep_rec->has_illuminance && ep_rec->illuminance_measured_value == measured_value_raw) {
+        device_table_unlock();
         return false;
     }
     ep_rec->has_illuminance = true;
     ep_rec->illuminance_measured_value = measured_value_raw;
     endpoint_readings_touch(rec, ep_rec);
+    device_table_unlock();
     return true;
 }
 
 bool device_table_note_reading_pressure(uint16_t short_addr, uint8_t ep, int16_t measured_value_0_1_kpa)
 {
+    if (!device_table_lock()) {
+        return false;
+    }
     device_record_t *rec = find_by_short(short_addr);
     device_endpoint_record_t *ep_rec = find_endpoint_for_reading(short_addr, ep);
     if (rec == NULL || ep_rec == NULL) {
+        device_table_unlock();
         return false;
     }
     if (measured_value_0_1_kpa == (int16_t)0x8000) {
+        device_table_unlock();
         return false;
     }
     if (ep_rec->has_pressure && ep_rec->pressure_0_1_kpa == measured_value_0_1_kpa) {
+        device_table_unlock();
         return false;
     }
     ep_rec->has_pressure = true;
     ep_rec->pressure_0_1_kpa = measured_value_0_1_kpa;
     endpoint_readings_touch(rec, ep_rec);
+    device_table_unlock();
     return true;
 }
 
 bool device_table_note_reading_ias_zone_status(uint16_t short_addr, uint8_t ep, uint16_t zone_status)
 {
+    if (!device_table_lock()) {
+        return false;
+    }
     device_record_t *rec = find_by_short(short_addr);
     device_endpoint_record_t *ep_rec = find_endpoint_for_reading(short_addr, ep);
     if (rec == NULL || ep_rec == NULL) {
+        device_table_unlock();
         return false;
     }
     if (ep_rec->has_ias_zone_status && ep_rec->ias_zone_status == zone_status) {
+        device_table_unlock();
         return false;
     }
     ep_rec->has_ias_zone_status = true;
     ep_rec->ias_zone_status = zone_status;
     endpoint_readings_touch(rec, ep_rec);
+    device_table_unlock();
     return true;
 }
 
 bool device_table_note_reading_battery_voltage(uint16_t short_addr, uint8_t ep, uint8_t voltage_100mv_units)
 {
+    if (!device_table_lock()) {
+        return false;
+    }
     device_record_t *rec = find_by_short(short_addr);
     device_endpoint_record_t *ep_rec = find_endpoint_for_reading(short_addr, ep);
     if (rec == NULL || ep_rec == NULL) {
+        device_table_unlock();
         return false;
     }
     if (voltage_100mv_units == 0xFFU) {
+        device_table_unlock();
         return false;
     }
     const uint16_t mv = (uint16_t)voltage_100mv_units * 100U;
     if (ep_rec->has_power_battery_voltage && ep_rec->battery_mv == mv) {
+        device_table_unlock();
         return false;
     }
     ep_rec->has_power_battery_voltage = true;
     ep_rec->battery_mv = mv;
     endpoint_readings_touch(rec, ep_rec);
+    device_table_unlock();
     return true;
 }
 
 bool device_table_note_reading_battery_pct(uint16_t short_addr, uint8_t ep, uint8_t percentage_remaining_half_pct)
 {
+    if (!device_table_lock()) {
+        return false;
+    }
     device_record_t *rec = find_by_short(short_addr);
     device_endpoint_record_t *ep_rec = find_endpoint_for_reading(short_addr, ep);
     if (rec == NULL || ep_rec == NULL) {
+        device_table_unlock();
         return false;
     }
     if (percentage_remaining_half_pct == 0xFFU) {
+        device_table_unlock();
         return false;
     }
     uint16_t p = (uint16_t)percentage_remaining_half_pct / 2U;
@@ -1170,11 +1395,13 @@ bool device_table_note_reading_battery_pct(uint16_t short_addr, uint8_t ep, uint
     }
     const uint8_t pct = (uint8_t)p;
     if (ep_rec->has_power_battery_pct && ep_rec->battery_pct == pct) {
+        device_table_unlock();
         return false;
     }
     ep_rec->has_power_battery_pct = true;
     ep_rec->battery_pct = pct;
     endpoint_readings_touch(rec, ep_rec);
+    device_table_unlock();
     return true;
 }
 
@@ -1219,8 +1446,12 @@ static bool endpoint_emit_poll_reads(device_table_zcl_read_req_fn_t fn, uint16_t
 
 bool device_table_get_health_probe(uint16_t short_addr, uint8_t *ep_out, uint16_t *cluster_id_out, uint16_t *attr_id_out)
 {
+    if (!device_table_lock()) {
+        return false;
+    }
     device_record_t *rec = find_by_short(short_addr);
     if (rec == NULL || ep_out == NULL || cluster_id_out == NULL || attr_id_out == NULL) {
+        device_table_unlock();
         return false;
     }
 
@@ -1233,40 +1464,53 @@ bool device_table_get_health_probe(uint16_t short_addr, uint8_t *ep_out, uint16_
             *ep_out = ep->endpoint_id;
             *cluster_id_out = 0x0000U;
             *attr_id_out = 0x0000U;
+            device_table_unlock();
             return true;
         }
         if (endpoint_has_cluster(ep, 0x0402U)) {
             *ep_out = ep->endpoint_id;
             *cluster_id_out = 0x0402U;
             *attr_id_out = 0x0000U;
+            device_table_unlock();
             return true;
         }
         if (endpoint_has_cluster(ep, 0x0006U)) {
             *ep_out = ep->endpoint_id;
             *cluster_id_out = 0x0006U;
             *attr_id_out = 0x0000U;
+            device_table_unlock();
             return true;
         }
     }
+    device_table_unlock();
     return false;
 }
 
 void device_table_note_poll_request(uint16_t short_addr, uint8_t ep)
 {
+    if (!device_table_lock()) {
+        return;
+    }
     device_record_t *rec = find_by_short(short_addr);
     if (rec == NULL) {
+        device_table_unlock();
         return;
     }
     device_endpoint_record_t *ep_rec = find_endpoint(rec, ep);
     if (ep_rec == NULL) {
+        device_table_unlock();
         return;
     }
     ep_rec->last_poll_read_s = timebase_now_s();
+    device_table_unlock();
 }
 
 void device_table_request_sensor_poll_reads(device_table_zcl_read_req_fn_t fn)
 {
     if (fn == NULL) {
+        return;
+    }
+    if (!device_table_lock()) {
         return;
     }
     const double now_s = timebase_now_s();
@@ -1288,21 +1532,42 @@ void device_table_request_sensor_poll_reads(device_table_zcl_read_req_fn_t fn)
             }
         }
     }
+    device_table_unlock();
 }
 
 void device_table_persist_cache(void)
 {
+    device_table_cache_head_t head = {0};
+    double now_s = 0.0;
+    double dirty_age_s = 0.0;
+    size_t occ = 0;
+    uint32_t next_write_idx = 0;
+    uint32_t snapshot_gen = 0;
+
+    if (!device_table_lock()) {
+        return;
+    }
     (void)canonicalize_device_records();
     if (!s_cache_dirty) {
+        device_table_unlock();
         return;
     }
-    const double now_s = timebase_now_s();
-    const double dirty_age_s = (s_cache_last_dirty_s > 0.0) ? (now_s - s_cache_last_dirty_s) : 0.0;
+    now_s = timebase_now_s();
+    dirty_age_s = (s_cache_last_dirty_s > 0.0) ? (now_s - s_cache_last_dirty_s) : 0.0;
     if (s_cache_last_dirty_s > 0.0 && dirty_age_s < CACHE_FLUSH_DEBOUNCE_S) {
+        device_table_unlock();
         return;
     }
-    const size_t occ = count_occupied_devices();
-    const uint32_t next_write_idx = s_cache_flash_write_count + 1U;
+    occ = count_occupied_devices();
+    next_write_idx = s_cache_flash_write_count + 1U;
+    snapshot_gen = s_cache_dirty_generation;
+    head.version = CACHE_VER;
+    head.device_count = (uint32_t)occ;
+    head.device_slots = DEVICE_TABLE_MAX_DEVICES;
+    head.record_size = sizeof(device_cache_record_t);
+    head.chunk_slots = CACHE_CHUNK_SLOTS;
+    head.chunk_size = sizeof(s_chunk_scratch);
+    device_table_unlock();
 
     ESP_LOGW(TAG,
              "[T+%07.3f] FLASH_WRITE_BEGIN zb_cache seq=%" PRIu32 " occupied=%u dirty_age=%.3f s bytes=%u",
@@ -1317,11 +1582,16 @@ void device_table_persist_cache(void)
 
     for (size_t c = 0; c < CACHE_NUM_CHUNKS; ++c) {
         char key[16];
+        if (!device_table_lock()) {
+            nvs_close(nvs);
+            return;
+        }
         memset(s_chunk_scratch, 0, sizeof(s_chunk_scratch));
         for (size_t i = 0; i < CACHE_CHUNK_SLOTS; ++i) {
             const size_t src_idx = (c * CACHE_CHUNK_SLOTS) + i;
             cache_record_from_device(&s_chunk_scratch[i], &s_devices[src_idx]);
         }
+        device_table_unlock();
         cache_chunk_key(key, sizeof(key), (unsigned)c);
         const size_t chunk_bytes = sizeof(s_chunk_scratch);
         err = nvs_set_blob(nvs, key, &s_chunk_scratch[0], chunk_bytes);
@@ -1342,14 +1612,6 @@ void device_table_persist_cache(void)
         }
     }
 
-    device_table_cache_head_t head = {
-        .version = CACHE_VER,
-        .device_count = (uint32_t)occ,
-        .device_slots = DEVICE_TABLE_MAX_DEVICES,
-        .record_size = sizeof(device_cache_record_t),
-        .chunk_slots = CACHE_CHUNK_SLOTS,
-        .chunk_size = sizeof(s_chunk_scratch),
-    };
     err = nvs_set_blob(nvs, "dt2_head", &head, sizeof(head));
     if (err != ESP_OK) {
         ESP_LOGE(TAG, "[T+%07.3f] NVS guardar dt2_head (%u B) fallo: %s", timebase_now_s(), (unsigned)sizeof(head), esp_err_to_name(err));
@@ -1361,27 +1623,39 @@ void device_table_persist_cache(void)
     }
 
     err = nvs_commit(nvs);
+    nvs_close(nvs);
     if (err != ESP_OK) {
         ESP_LOGE(TAG, "[T+%07.3f] NVS commit cache fallo: %s", timebase_now_s(), esp_err_to_name(err));
-        nvs_close(nvs);
         return;
     }
 
+    if (!device_table_lock()) {
+        return;
+    }
     s_cache_loaded = true;
     s_cache_flash_write_count = next_write_idx;
     snprintf(s_cache_nvs_format, sizeof(s_cache_nvs_format), "chunked-fixed");
+    if (s_cache_dirty && s_cache_dirty_generation == snapshot_gen) {
+        s_cache_dirty = false;
+        s_cache_last_dirty_s = 0.0;
+    }
+    device_table_unlock();
+
     ESP_LOGW(TAG,
              "[T+%07.3f] FLASH_WRITE_END zb_cache seq=%" PRIu32 " commit=OK formato=%s head=%u B + %u x %u B reservado_max=%u B ocupados=%u",
-             timebase_now_s(), s_cache_flash_write_count, s_cache_nvs_format, (unsigned)sizeof(head), (unsigned)CACHE_NUM_CHUNKS,
+             timebase_now_s(), next_write_idx, "chunked-fixed", (unsigned)sizeof(head), (unsigned)CACHE_NUM_CHUNKS,
              (unsigned)sizeof(s_chunk_scratch), (unsigned)cache_payload_reserved_bytes(), (unsigned)occ);
-    log_devices_table_contents("NVS escrito");
-    s_cache_dirty = false;
-    s_cache_last_dirty_s = 0.0;
-    nvs_close(nvs);
+    if (device_table_lock()) {
+        log_devices_table_contents("NVS escrito");
+        device_table_unlock();
+    }
 }
 
 void device_table_dump_json(void)
 {
+    if (!device_table_lock()) {
+        return;
+    }
     (void)canonicalize_device_records();
     size_t silent_count = 0;
     device_table_network_summary_t summary = {0};
@@ -1579,4 +1853,5 @@ void device_table_dump_json(void)
     }
     printf("\n  ]\n");
     printf("}\n");
+    device_table_unlock();
 }

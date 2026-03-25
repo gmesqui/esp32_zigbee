@@ -17,6 +17,18 @@
 
 static const char *TAG = "app_main";
 static const gpio_num_t BOOT_BUTTON_GPIO = GPIO_NUM_28;
+static const TickType_t DEVICE_TABLE_PERSIST_PERIOD_TICKS = pdMS_TO_TICKS(250);
+static const uint32_t DEVICE_TABLE_PERSIST_TASK_STACK = 4096;
+static const UBaseType_t DEVICE_TABLE_PERSIST_TASK_PRIO = 4;
+
+static void device_table_persist_task(void *arg)
+{
+    (void)arg;
+    while (true) {
+        device_table_persist_cache();
+        vTaskDelay(DEVICE_TABLE_PERSIST_PERIOD_TICKS);
+    }
+}
 
 static void disable_wifi_radio(void)
 {
@@ -66,6 +78,7 @@ static void on_zb_event(const char *event_name)
             led_status_set_base(LED_BASE_READY_OPEN);
         }
     }
+    (void)mqtt_bridge_notify_zigbee_event(event_name);
     ESP_LOGI(TAG, "[T+%07.3f] EVT %s", timebase_now_s(), event_name);
 }
 
@@ -100,6 +113,7 @@ void app_main(void)
     ESP_ERROR_CHECK(gpio_config(&io_conf));
 
     serial_cmd_start();
+    xTaskCreate(device_table_persist_task, "device_table_persist", DEVICE_TABLE_PERSIST_TASK_STACK, NULL, DEVICE_TABLE_PERSIST_TASK_PRIO, NULL);
 
     bool permit_join_open = false;
     TickType_t permit_join_deadline = 0;
@@ -149,9 +163,6 @@ void app_main(void)
             led_status_set_base(LED_BASE_READY_CLOSED);
             ESP_LOGI(TAG, "[T+%07.3f] Permit join expirado (180s) -> CERRADO", timebase_now_s());
         }
-
-        device_table_persist_cache();
-
         led_status_poll();
         vTaskDelay(pdMS_TO_TICKS(25));
     }

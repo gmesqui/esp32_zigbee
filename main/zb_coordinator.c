@@ -34,12 +34,19 @@
 
 static const char *TAG = "zb_coord";
 static zb_network_runtime_t s_runtime;
+static zb_coord_event_info_t s_last_event;
 static zb_coordinator_event_cb_t s_event_cb = NULL;
 static bool s_stack_started = false;
 static const uint8_t COORDINATOR_ENDPOINT = 1;
 static const uint32_t ZB_COORD_PRIMARY_CHANNEL_MASK = 0x01FFF800U; /* canales 11-24 */
 static const char *ZB_COORD_PRIMARY_CHANNEL_POLICY = "11-24";
 static void emit_event(const char *name);
+static void event_info_reset(const char *name);
+static void event_info_set_device(uint64_t ieee, uint16_t short_addr, uint8_t endpoint);
+static void event_info_set_cluster(uint16_t profile_id, uint16_t cluster_id);
+static void event_info_set_status(const char *status);
+static bool zcl_apply_attribute_to_readings(uint16_t short_addr, uint8_t ep, uint16_t cluster_id, const esp_zb_zcl_attribute_t *attr);
+static bool zcl_attr_get_on_off_value(const esp_zb_zcl_attribute_t *attr, bool *out_on);
 static const uint32_t ZB_COORD_RUNTIME_VERSION = 1U;
 
 #define IDENTITY_JOB_MAX 16
@@ -47,6 +54,7 @@ static const uint32_t ZB_COORD_RUNTIME_VERSION = 1U;
 #define INTERVIEW_JOB_MAX 32
 #define REQ_TRACK_MAX 64
 #define IEEE_RESOLVE_MAX 32
+#define DEFERRED_ATTR_MAX 24
 #define PENDING_INTERVIEW_MAX 16
 #define SILENT_TIMEOUT_S 120.0
 #define ABSENT_TIMEOUT_S 420.0
@@ -76,11 +84,14 @@ typedef struct {
     uint8_t ep_count;
     uint8_t ep_list[DEVICE_TABLE_MAX_ENDPOINTS];
     bool simple_desc_done[DEVICE_TABLE_MAX_ENDPOINTS];
+    bool simple_desc_pending[DEVICE_TABLE_MAX_ENDPOINTS];
     TickType_t next_tick;
     double last_seen_s;
     double last_interview_s;
     bool node_desc_ok;
+    bool node_desc_pending;
     bool active_ep_ok;
+    bool active_ep_pending;
     bool simple_desc_ok;
 } interview_job_t;
 
@@ -103,13 +114,28 @@ typedef struct {
     uint8_t tries;
 } ieee_resolve_job_t;
 
+typedef struct {
+    bool used;
+    uint16_t short_addr;
+    uint8_t endpoint;
+    uint16_t cluster_id;
+    uint16_t attr_id;
+    uint8_t attr_type;
+    uint8_t attr_size;
+    uint8_t attr_value[8];
+    double captured_s;
+} deferred_attr_t;
+
 static ieee_resolve_job_t s_ieee_resolve[IEEE_RESOLVE_MAX];
+static deferred_attr_t s_deferred_attrs[DEFERRED_ATTR_MAX];
 static TickType_t s_next_sensor_poll_tick = 0;
 static uint16_t s_pending_interview[PENDING_INTERVIEW_MAX];
 static size_t s_pending_interview_n;
 
 static void interview_start(uint16_t short_addr);
 static bool aps_data_indication_handler(esp_zb_apsde_data_ind_t ind);
+static bool deferred_attr_store(uint16_t short_addr, uint8_t endpoint, uint16_t cluster_id, const esp_zb_zcl_attribute_t *attr);
+static void deferred_attr_flush_short(uint16_t short_addr);
 
 static TickType_t delay_with_jitter_ms(uint32_t base_ms, uint32_t span_ms, uint16_t short_addr, uint8_t salt)
 {
@@ -162,6 +188,96 @@ static bool has_cluster(const uint16_t *clusters, size_t clusters_len, uint16_t 
         }
     }
     return false;
+}
+
+static deferred_attr_t *deferred_attr_find(uint16_t short_addr, uint8_t endpoint, uint16_t cluster_id, uint16_t attr_id)
+{
+    for (size_t i = 0; i < DEFERRED_ATTR_MAX; ++i) {
+        deferred_attr_t *entry = &s_deferred_attrs[i];
+        if (!entry->used) {
+            continue;
+        }
+        if (entry->short_addr == short_addr && entry->endpoint == endpoint && entry->cluster_id == cluster_id && entry->attr_id == attr_id) {
+            return entry;
+        }
+    }
+    return NULL;
+}
+
+static deferred_attr_t *deferred_attr_get_slot(uint16_t short_addr, uint8_t endpoint, uint16_t cluster_id, uint16_t attr_id)
+{
+    deferred_attr_t *entry = deferred_attr_find(short_addr, endpoint, cluster_id, attr_id);
+    if (entry != NULL) {
+        return entry;
+    }
+    for (size_t i = 0; i < DEFERRED_ATTR_MAX; ++i) {
+        if (!s_deferred_attrs[i].used) {
+            return &s_deferred_attrs[i];
+        }
+    }
+    size_t oldest_idx = 0;
+    double oldest_s = s_deferred_attrs[0].captured_s;
+    for (size_t i = 1; i < DEFERRED_ATTR_MAX; ++i) {
+        if (s_deferred_attrs[i].captured_s < oldest_s) {
+            oldest_s = s_deferred_attrs[i].captured_s;
+            oldest_idx = i;
+        }
+    }
+    return &s_deferred_attrs[oldest_idx];
+}
+
+static bool deferred_attr_store(uint16_t short_addr, uint8_t endpoint, uint16_t cluster_id, const esp_zb_zcl_attribute_t *attr)
+{
+    if (short_addr == 0x0000U || short_addr == 0xFFFFU || attr == NULL || attr->data.value == NULL || attr->data.size == 0U ||
+        attr->data.size > sizeof(((deferred_attr_t *)0)->attr_value)) {
+        return false;
+    }
+    deferred_attr_t *entry = deferred_attr_get_slot(short_addr, endpoint, cluster_id, attr->id);
+    if (entry == NULL) {
+        return false;
+    }
+    memset(entry, 0, sizeof(*entry));
+    entry->used = true;
+    entry->short_addr = short_addr;
+    entry->endpoint = endpoint;
+    entry->cluster_id = cluster_id;
+    entry->attr_id = attr->id;
+    entry->attr_type = (uint8_t)attr->data.type;
+    entry->attr_size = (uint8_t)attr->data.size;
+    memcpy(entry->attr_value, attr->data.value, attr->data.size);
+    entry->captured_s = timebase_now_s();
+    return true;
+}
+
+static void deferred_attr_flush_short(uint16_t short_addr)
+{
+    for (size_t i = 0; i < DEFERRED_ATTR_MAX; ++i) {
+        deferred_attr_t *entry = &s_deferred_attrs[i];
+        if (!entry->used || entry->short_addr != short_addr) {
+            continue;
+        }
+        esp_zb_zcl_attribute_t attr = {};
+        attr.id = entry->attr_id;
+        attr.data.type = (esp_zb_zcl_attr_type_t)entry->attr_type;
+        attr.data.size = entry->attr_size;
+        attr.data.value = entry->attr_value;
+        const bool reading_changed = zcl_apply_attribute_to_readings(entry->short_addr, entry->endpoint, entry->cluster_id, &attr);
+        if (reading_changed) {
+            ESP_LOGI(TAG, "[T+%07.3f] Reporte diferido aplicado short=0x%04X ep=%u cluster=0x%04X attr=0x%04X", timebase_now_s(),
+                     entry->short_addr, entry->endpoint, entry->cluster_id, entry->attr_id);
+            event_info_reset("DEVICE_REPORT");
+            event_info_set_device(0U, entry->short_addr, entry->endpoint);
+            event_info_set_cluster(ESP_ZB_AF_HA_PROFILE_ID, entry->cluster_id);
+            emit_event("DEVICE_REPORT");
+        } else if (entry->cluster_id == ESP_ZB_ZCL_CLUSTER_ID_ON_OFF && entry->attr_id == ESP_ZB_ZCL_ATTR_ON_OFF_ON_OFF_ID) {
+            bool on = false;
+            if (zcl_attr_get_on_off_value(&attr, &on)) {
+                ESP_LOGI(TAG, "[T+%07.3f] Reporte diferido on_off ya estaba aplicado short=0x%04X ep=%u -> %s", timebase_now_s(),
+                         entry->short_addr, entry->endpoint, on ? "ON" : "OFF");
+            }
+        }
+        entry->used = false;
+    }
 }
 
 static interview_job_t *interview_find(uint16_t short_addr)
@@ -347,6 +463,7 @@ static void ieee_addr_cb(esp_zb_zdp_status_t zdo_status, esp_zb_zdo_ieee_addr_rs
             ieee |= ((uint64_t)resp->ieee_addr[i] << (8 * i));
         }
         device_table_update_discovery(ieee, resp->nwk_addr, 0, NULL, NULL);
+        deferred_attr_flush_short(resp->nwk_addr);
         zb_coordinator_note_inbound_device_traffic(resp->nwk_addr);
         /* Misma secuencia que tras DEVICE_ANNCE: entrevista completa fuera del callback ZDO. */
         (void)interview_request_enqueue(resp->nwk_addr, "ieee_resolved");
@@ -497,6 +614,15 @@ static bool zcl_attr_get_on_off_value(const esp_zb_zcl_attribute_t *attr, bool *
     return true;
 }
 
+static void log_on_off_non_state_attr(uint16_t short_addr, uint8_t ep, const esp_zb_zcl_attribute_t *attr)
+{
+    if (attr == NULL) {
+        return;
+    }
+    ESP_LOGI(TAG, "[T+%07.3f] OnOff attr no mapeado short=0x%04X ep=%u attr=0x%04X type=0x%02X size=%u", timebase_now_s(), short_addr, ep,
+             attr->id, (unsigned)attr->data.type, (unsigned)attr->data.size);
+}
+
 /** Interpreta atributo ZCL y actualiza lecturas en la tabla (informes y Read RSP). @return true si la lectura almacenada cambio. */
 static bool zcl_apply_attribute_to_readings(uint16_t short_addr, uint8_t ep, uint16_t cluster_id, const esp_zb_zcl_attribute_t *attr)
 {
@@ -536,6 +662,10 @@ static bool zcl_apply_attribute_to_readings(uint16_t short_addr, uint8_t ep, uin
                 return true;
             }
         }
+        return false;
+    }
+    if (cluster_id == ESP_ZB_ZCL_CLUSTER_ID_ON_OFF) {
+        log_on_off_non_state_attr(short_addr, ep, attr);
         return false;
     }
     if (cluster_id == ESP_ZB_ZCL_CLUSTER_ID_OCCUPANCY_SENSING && attr->id == ESP_ZB_ZCL_ATTR_OCCUPANCY_SENSING_OCCUPANCY_ID) {
@@ -709,6 +839,10 @@ static void node_desc_cb(esp_zb_zdp_status_t zdo_status, uint16_t addr, esp_zb_a
 
 static void interview_request_node_desc(uint16_t short_addr)
 {
+    interview_job_t *job = interview_find(short_addr);
+    if (job != NULL) {
+        job->node_desc_pending = true;
+    }
     esp_zb_zdo_node_desc_req_param_t req = {
         .dst_nwk_addr = short_addr,
     };
@@ -722,6 +856,10 @@ static void simple_desc_cb(esp_zb_zdp_status_t zdo_status, esp_zb_af_simple_desc
     const uint8_t req_ep = (uint8_t)(packed & 0xFF);
     zb_coordinator_note_inbound_device_traffic(short_addr);
     interview_job_t *job = interview_find(short_addr);
+    const int ep_slot = interview_endpoint_slot(job, req_ep);
+    if (job != NULL && ep_slot >= 0) {
+        job->simple_desc_pending[ep_slot] = false;
+    }
     if (zdo_status != ESP_ZB_ZDP_STATUS_SUCCESS || simple_desc == NULL) {
         if (interview_job_complete(job)) {
             ESP_LOGI(TAG, "[T+%07.3f] Entrevista simple desc tardia ignorada short=0x%04X status=0x%02X", timebase_now_s(), short_addr,
@@ -739,7 +877,6 @@ static void simple_desc_cb(esp_zb_zdp_status_t zdo_status, esp_zb_af_simple_desc
         return;
     }
 
-    const int ep_slot = interview_endpoint_slot(job, req_ep);
     if (job != NULL && ep_slot >= 0 && job->simple_desc_done[ep_slot]) {
         ESP_LOGI(TAG, "[T+%07.3f] Entrevista simple desc duplicada ignorada short=0x%04X ep=%u", timebase_now_s(), short_addr, req_ep);
         return;
@@ -764,6 +901,10 @@ static void simple_desc_cb(esp_zb_zdp_status_t zdo_status, esp_zb_af_simple_desc
                                     simple_desc->app_device_version, clusters_in, in_len, clusters_out, out_len);
     ESP_LOGI(TAG, "[T+%07.3f] Entrevista EP=%u short=0x%04X device_id=0x%04X in=%u out=%u", timebase_now_s(), simple_desc->endpoint, short_addr,
              simple_desc->app_device_id, in_count, out_count);
+    event_info_reset("INTERVIEW_SIMPLE_DESC");
+    event_info_set_device(0U, short_addr, simple_desc->endpoint);
+    event_info_set_cluster(simple_desc->app_profile_id, 0x8004U);
+    event_info_set_status("successful");
     emit_event("INTERVIEW_SIMPLE_DESC");
     if (job != NULL) {
         job->phase = 3;
@@ -791,6 +932,10 @@ static void simple_desc_cb(esp_zb_zdp_status_t zdo_status, esp_zb_af_simple_desc
                           ESP_ZB_ZCL_ATTR_TEMP_MEASUREMENT_VALUE_ID);
         zcl_config_report_req(short_addr, simple_desc->endpoint, ESP_ZB_ZCL_CLUSTER_ID_TEMP_MEASUREMENT,
                               ESP_ZB_ZCL_ATTR_TEMP_MEASUREMENT_VALUE_ID, ESP_ZB_ZCL_ATTR_TYPE_S16, 30, 300, &temp_delta);
+        event_info_reset("INTERVIEW_CONFIG");
+        event_info_set_device(0U, short_addr, simple_desc->endpoint);
+        event_info_set_cluster(ESP_ZB_AF_HA_PROFILE_ID, ESP_ZB_ZCL_CLUSTER_ID_TEMP_MEASUREMENT);
+        event_info_set_status("configured");
         emit_event("INTERVIEW_CONFIG");
         ESP_LOGI(TAG, "[T+%07.3f] Temp sensor detectado short=0x%04X ep=%u", timebase_now_s(), short_addr, simple_desc->endpoint);
     }
@@ -800,6 +945,10 @@ static void simple_desc_cb(esp_zb_zdp_status_t zdo_status, esp_zb_af_simple_desc
                           ESP_ZB_ZCL_ATTR_REL_HUMIDITY_MEASUREMENT_VALUE_ID);
         zcl_config_report_req(short_addr, simple_desc->endpoint, ESP_ZB_ZCL_CLUSTER_ID_REL_HUMIDITY_MEASUREMENT,
                               ESP_ZB_ZCL_ATTR_REL_HUMIDITY_MEASUREMENT_VALUE_ID, ESP_ZB_ZCL_ATTR_TYPE_U16, 30, 300, &hum_delta);
+        event_info_reset("INTERVIEW_CONFIG");
+        event_info_set_device(0U, short_addr, simple_desc->endpoint);
+        event_info_set_cluster(ESP_ZB_AF_HA_PROFILE_ID, ESP_ZB_ZCL_CLUSTER_ID_REL_HUMIDITY_MEASUREMENT);
+        event_info_set_status("configured");
         emit_event("INTERVIEW_CONFIG");
         ESP_LOGI(TAG, "[T+%07.3f] Humidity sensor detectado short=0x%04X ep=%u", timebase_now_s(), short_addr, simple_desc->endpoint);
     }
@@ -809,6 +958,10 @@ static void simple_desc_cb(esp_zb_zdp_status_t zdo_status, esp_zb_af_simple_desc
                           ESP_ZB_ZCL_ATTR_OCCUPANCY_SENSING_OCCUPANCY_ID);
         zcl_config_report_req(short_addr, simple_desc->endpoint, ESP_ZB_ZCL_CLUSTER_ID_OCCUPANCY_SENSING,
                               ESP_ZB_ZCL_ATTR_OCCUPANCY_SENSING_OCCUPANCY_ID, ESP_ZB_ZCL_ATTR_TYPE_U8, 1, 120, &occ_delta);
+        event_info_reset("INTERVIEW_CONFIG");
+        event_info_set_device(0U, short_addr, simple_desc->endpoint);
+        event_info_set_cluster(ESP_ZB_AF_HA_PROFILE_ID, ESP_ZB_ZCL_CLUSTER_ID_OCCUPANCY_SENSING);
+        event_info_set_status("configured");
         emit_event("INTERVIEW_CONFIG");
         ESP_LOGI(TAG, "[T+%07.3f] Presence sensor detectado short=0x%04X ep=%u", timebase_now_s(), short_addr, simple_desc->endpoint);
     }
@@ -825,6 +978,10 @@ static void simple_desc_cb(esp_zb_zdp_status_t zdo_status, esp_zb_af_simple_desc
                           ESP_ZB_ZCL_ATTR_ILLUMINANCE_MEASUREMENT_MEASURED_VALUE_ID);
         zcl_config_report_req(short_addr, simple_desc->endpoint, ESP_ZB_ZCL_CLUSTER_ID_ILLUMINANCE_MEASUREMENT,
                               ESP_ZB_ZCL_ATTR_ILLUMINANCE_MEASUREMENT_MEASURED_VALUE_ID, ESP_ZB_ZCL_ATTR_TYPE_U16, 30, 300, &ill_delta);
+        event_info_reset("INTERVIEW_CONFIG");
+        event_info_set_device(0U, short_addr, simple_desc->endpoint);
+        event_info_set_cluster(ESP_ZB_AF_HA_PROFILE_ID, ESP_ZB_ZCL_CLUSTER_ID_ILLUMINANCE_MEASUREMENT);
+        event_info_set_status("configured");
         emit_event("INTERVIEW_CONFIG");
         ESP_LOGI(TAG, "[T+%07.3f] Sensor iluminancia short=0x%04X ep=%u", timebase_now_s(), short_addr, simple_desc->endpoint);
     }
@@ -834,6 +991,10 @@ static void simple_desc_cb(esp_zb_zdp_status_t zdo_status, esp_zb_af_simple_desc
                           ESP_ZB_ZCL_ATTR_PRESSURE_MEASUREMENT_VALUE_ID);
         zcl_config_report_req(short_addr, simple_desc->endpoint, ESP_ZB_ZCL_CLUSTER_ID_PRESSURE_MEASUREMENT,
                               ESP_ZB_ZCL_ATTR_PRESSURE_MEASUREMENT_VALUE_ID, ESP_ZB_ZCL_ATTR_TYPE_S16, 30, 300, &pres_delta);
+        event_info_reset("INTERVIEW_CONFIG");
+        event_info_set_device(0U, short_addr, simple_desc->endpoint);
+        event_info_set_cluster(ESP_ZB_AF_HA_PROFILE_ID, ESP_ZB_ZCL_CLUSTER_ID_PRESSURE_MEASUREMENT);
+        event_info_set_status("configured");
         emit_event("INTERVIEW_CONFIG");
         ESP_LOGI(TAG, "[T+%07.3f] Sensor presion short=0x%04X ep=%u", timebase_now_s(), short_addr, simple_desc->endpoint);
     }
@@ -848,6 +1009,10 @@ static void simple_desc_cb(esp_zb_zdp_status_t zdo_status, esp_zb_af_simple_desc
                               ESP_ZB_ZCL_ATTR_POWER_CONFIG_BATTERY_VOLTAGE_ID, ESP_ZB_ZCL_ATTR_TYPE_U8, 60, 3600, &v_delta);
         zcl_config_report_req(short_addr, simple_desc->endpoint, ESP_ZB_ZCL_CLUSTER_ID_POWER_CONFIG,
                               ESP_ZB_ZCL_ATTR_POWER_CONFIG_BATTERY_PERCENTAGE_REMAINING_ID, ESP_ZB_ZCL_ATTR_TYPE_U8, 60, 3600, &pct_delta);
+        event_info_reset("INTERVIEW_CONFIG");
+        event_info_set_device(0U, short_addr, simple_desc->endpoint);
+        event_info_set_cluster(ESP_ZB_AF_HA_PROFILE_ID, ESP_ZB_ZCL_CLUSTER_ID_POWER_CONFIG);
+        event_info_set_status("configured");
         emit_event("INTERVIEW_CONFIG");
         ESP_LOGI(TAG, "[T+%07.3f] Power Config (bateria) short=0x%04X ep=%u", timebase_now_s(), short_addr, simple_desc->endpoint);
     }
@@ -856,6 +1021,10 @@ static void simple_desc_cb(esp_zb_zdp_status_t zdo_status, esp_zb_af_simple_desc
         zcl_read_attr_req(short_addr, simple_desc->endpoint, ESP_ZB_ZCL_CLUSTER_ID_IAS_ZONE, ESP_ZB_ZCL_ATTR_IAS_ZONE_ZONESTATUS_ID);
         zcl_config_report_req(short_addr, simple_desc->endpoint, ESP_ZB_ZCL_CLUSTER_ID_IAS_ZONE, ESP_ZB_ZCL_ATTR_IAS_ZONE_ZONESTATUS_ID,
                               ESP_ZB_ZCL_ATTR_TYPE_16BITMAP, 10, 300, &zs_delta);
+        event_info_reset("INTERVIEW_CONFIG");
+        event_info_set_device(0U, short_addr, simple_desc->endpoint);
+        event_info_set_cluster(ESP_ZB_AF_HA_PROFILE_ID, ESP_ZB_ZCL_CLUSTER_ID_IAS_ZONE);
+        event_info_set_status("configured");
         emit_event("INTERVIEW_CONFIG");
         ESP_LOGI(TAG, "[T+%07.3f] IAS Zone short=0x%04X ep=%u", timebase_now_s(), short_addr, simple_desc->endpoint);
     }
@@ -866,6 +1035,9 @@ static void active_ep_cb(esp_zb_zdp_status_t zdo_status, uint8_t ep_count, uint8
     const uint16_t short_addr = (uint16_t)(uintptr_t)user_ctx;
     zb_coordinator_note_inbound_device_traffic(short_addr);
     interview_job_t *job = interview_find(short_addr);
+    if (job != NULL) {
+        job->active_ep_pending = false;
+    }
     if (zdo_status != ESP_ZB_ZDP_STATUS_SUCCESS || ep_id_list == NULL || ep_count == 0) {
         if (interview_job_complete(job) || interview_job_has_useful_profile(job)) {
             ESP_LOGI(TAG, "[T+%07.3f] Entrevista active_ep tardia ignorada short=0x%04X status=0x%02X", timebase_now_s(), short_addr,
@@ -895,6 +1067,7 @@ static void active_ep_cb(esp_zb_zdp_status_t zdo_status, uint8_t ep_count, uint8
         job->ep_count = (ep_count > DEVICE_TABLE_MAX_ENDPOINTS) ? DEVICE_TABLE_MAX_ENDPOINTS : ep_count;
         memcpy(job->ep_list, ep_id_list, job->ep_count);
         memset(job->simple_desc_done, 0, sizeof(job->simple_desc_done));
+        memset(job->simple_desc_pending, 0, sizeof(job->simple_desc_pending));
         job->simple_desc_ok = false;
     }
     for (uint8_t i = 0; i < ep_count; ++i) {
@@ -907,6 +1080,9 @@ static void node_desc_cb(esp_zb_zdp_status_t zdo_status, uint16_t addr, esp_zb_a
     const uint16_t short_addr = (addr != 0x0000U && addr != 0xFFFFU) ? addr : (uint16_t)(uintptr_t)user_ctx;
     zb_coordinator_note_inbound_device_traffic(short_addr);
     interview_job_t *job = interview_find(short_addr);
+    if (job != NULL) {
+        job->node_desc_pending = false;
+    }
     if (zdo_status != ESP_ZB_ZDP_STATUS_SUCCESS || node_desc == NULL) {
         if (interview_job_complete(job) || interview_job_has_useful_profile(job)) {
             ESP_LOGI(TAG, "[T+%07.3f] Entrevista node_desc tardia ignorada short=0x%04X status=0x%02X", timebase_now_s(), short_addr,
@@ -941,6 +1117,11 @@ static void node_desc_cb(esp_zb_zdp_status_t zdo_status, uint16_t addr, esp_zb_a
 
 static void interview_request_simple_desc(uint16_t short_addr, uint8_t endpoint)
 {
+    interview_job_t *job = interview_find(short_addr);
+    const int ep_slot = interview_endpoint_slot(job, endpoint);
+    if (job != NULL && ep_slot >= 0) {
+        job->simple_desc_pending[ep_slot] = true;
+    }
     esp_zb_zdo_simple_desc_req_param_t req = {
         .addr_of_interest = short_addr,
         .endpoint = endpoint,
@@ -969,9 +1150,12 @@ static void interview_start(uint16_t short_addr)
         job->phase = 1;
         job->ep_count = 0;
         job->node_desc_ok = false;
+        job->node_desc_pending = false;
         job->active_ep_ok = false;
+        job->active_ep_pending = false;
         job->simple_desc_ok = false;
         memset(job->simple_desc_done, 0, sizeof(job->simple_desc_done));
+        memset(job->simple_desc_pending, 0, sizeof(job->simple_desc_pending));
         job->last_seen_s = now_s;
         job->next_tick = delay_with_jitter_ms(1000U, 400U, short_addr, 1U);
         device_table_mark_interview(short_addr, 1, false, false);
@@ -980,9 +1164,15 @@ static void interview_start(uint16_t short_addr)
     esp_zb_zdo_active_ep_req_param_t active_req = {
         .addr_of_interest = short_addr,
     };
+    if (job != NULL) {
+        job->active_ep_pending = true;
+    }
     esp_zb_zdo_active_ep_req(&active_req, active_ep_cb, (void *)(uintptr_t)short_addr);
     interview_request_node_desc(short_addr);
     ESP_LOGI(TAG, "[T+%07.3f] Entrevista iniciada para 0x%04X", now_s, short_addr);
+    event_info_reset("INTERVIEW_START");
+    event_info_set_device(0U, short_addr, 0U);
+    event_info_set_status("started");
     emit_event("INTERVIEW_START");
 }
 
@@ -1049,6 +1239,9 @@ static void health_and_interview_poll(void)
             device_table_mark_silent(j->short_addr, true);
             if ((now_s - j->last_seen_s) > ABSENT_TIMEOUT_S) {
                 device_table_mark_absent_prolonged(j->short_addr, true);
+                event_info_reset("NODE_ABSENT_PROLONGED");
+                event_info_set_device(0U, j->short_addr, 0U);
+                event_info_set_status("absent_prolonged");
                 emit_event("NODE_ABSENT_PROLONGED");
             }
         } else {
@@ -1069,19 +1262,20 @@ static void health_and_interview_poll(void)
                 continue;
             }
             bool requested = false;
-            if (!j->node_desc_ok) {
+            if (!j->node_desc_ok && !j->node_desc_pending) {
                 interview_request_node_desc(j->short_addr);
                 requested = true;
             }
-            if (!j->active_ep_ok) {
+            if (!j->active_ep_ok && !j->active_ep_pending) {
                 esp_zb_zdo_active_ep_req_param_t active_req = {
                     .addr_of_interest = j->short_addr,
                 };
+                j->active_ep_pending = true;
                 esp_zb_zdo_active_ep_req(&active_req, active_ep_cb, (void *)(uintptr_t)j->short_addr);
                 requested = true;
             } else if (!j->simple_desc_ok) {
                 for (uint8_t ep_i = 0; ep_i < j->ep_count; ++ep_i) {
-                    if (!j->simple_desc_done[ep_i]) {
+                    if (!j->simple_desc_done[ep_i] && !j->simple_desc_pending[ep_i]) {
                         interview_request_simple_desc(j->short_addr, j->ep_list[ep_i]);
                         requested = true;
                     }
@@ -1103,6 +1297,38 @@ static void emit_event(const char *name)
     if (s_event_cb != NULL) {
         s_event_cb(name);
     }
+}
+
+static void event_info_reset(const char *name)
+{
+    memset(&s_last_event, 0, sizeof(s_last_event));
+    snprintf(s_last_event.name, sizeof(s_last_event.name), "%s", name != NULL ? name : "UNKNOWN");
+    s_last_event.ts_s = timebase_now_s();
+}
+
+static void event_info_set_device(uint64_t ieee, uint16_t short_addr, uint8_t endpoint)
+{
+    s_last_event.has_device = true;
+    s_last_event.ieee = ieee;
+    s_last_event.short_addr = short_addr;
+    s_last_event.endpoint = endpoint;
+}
+
+static void event_info_set_cluster(uint16_t profile_id, uint16_t cluster_id)
+{
+    s_last_event.profile_id = profile_id;
+    s_last_event.cluster_id = cluster_id;
+}
+
+static void event_info_set_status(const char *status)
+{
+    if (status == NULL || status[0] == '\0') {
+        s_last_event.has_status = false;
+        s_last_event.status[0] = '\0';
+        return;
+    }
+    s_last_event.has_status = true;
+    snprintf(s_last_event.status, sizeof(s_last_event.status), "%s", status);
 }
 
 static uint64_t ieee_to_u64(const uint8_t ieee[8])
@@ -1219,6 +1445,9 @@ static bool aps_data_indication_handler(esp_zb_apsde_data_ind_t ind)
          cmd_id == ESP_ZB_ZCL_CMD_ON_OFF_ON_WITH_TIMED_OFF_ID)) {
         const size_t copy_len = (ind.asdu_length < 16U) ? ind.asdu_length : 16U;
         (void)zb_trace_log_packet(ZB_DIR_RX, &meta, ind.asdu, copy_len);
+        event_info_reset("DEVICE_COMMAND_ON_OFF");
+        event_info_set_device(0U, ind.src_short_addr, ind.src_endpoint);
+        event_info_set_cluster(ind.profile_id, ind.cluster_id);
         emit_event("DEVICE_COMMAND_ON_OFF");
     }
     return false;
@@ -1258,14 +1487,27 @@ static esp_err_t zb_action_handler(esp_zb_core_action_callback_id_t callback_id,
         }
         (void)zb_trace_log_packet(ZB_DIR_RX, &meta, payload, n);
         device_table_update_from_trace(&meta);
-        if (!device_table_has_short_addr(meta.src_short)) {
+        const bool short_known = device_table_has_short_addr(meta.src_short);
+        if (!short_known) {
             ieee_resolve_schedule(meta.src_short);
         }
         bool reading_changed = false;
         if (m->status == ESP_ZB_ZCL_STATUS_SUCCESS) {
-            reading_changed = zcl_apply_attribute_to_readings(meta.src_short, m->src_endpoint, m->cluster, &m->attribute);
+            if (!short_known) {
+                if (deferred_attr_store(meta.src_short, m->src_endpoint, m->cluster, &m->attribute)) {
+                    ESP_LOGI(TAG,
+                             "[T+%07.3f] Reporte diferido short=0x%04X ep=%u cluster=0x%04X attr=0x%04X (esperando IEEE resolve)",
+                             timebase_now_s(), meta.src_short, m->src_endpoint, m->cluster, m->attribute.id);
+                } else {
+                    ESP_LOGW(TAG,
+                             "[T+%07.3f] Reporte no aplicable aun short=0x%04X ep=%u cluster=0x%04X attr=0x%04X (sin slot diferido)",
+                             timebase_now_s(), meta.src_short, m->src_endpoint, m->cluster, m->attribute.id);
+                }
+            } else {
+                reading_changed = zcl_apply_attribute_to_readings(meta.src_short, m->src_endpoint, m->cluster, &m->attribute);
+            }
             device_table_inc_counter("report_attr_ok");
-            if (!reading_changed) {
+            if (short_known && !reading_changed) {
                 device_table_inc_counter("report_attr_unchanged");
                 if (m->cluster == ESP_ZB_ZCL_CLUSTER_ID_ON_OFF && m->attribute.id == ESP_ZB_ZCL_ATTR_ON_OFF_ON_OFF_ID) {
                     bool on = false;
@@ -1277,6 +1519,9 @@ static esp_err_t zb_action_handler(esp_zb_core_action_callback_id_t callback_id,
             }
         }
         if (reading_changed) {
+            event_info_reset("DEVICE_REPORT");
+            event_info_set_device(0U, meta.src_short, m->src_endpoint);
+            event_info_set_cluster(meta.profile_id, m->cluster);
             emit_event("DEVICE_REPORT");
         }
         return ESP_OK;
@@ -1386,6 +1631,7 @@ esp_err_t zb_coordinator_init(zb_coordinator_event_cb_t event_cb)
 {
     s_event_cb = event_cb;
     memset(&s_runtime, 0, sizeof(s_runtime));
+    memset(&s_last_event, 0, sizeof(s_last_event));
     s_runtime.version = ZB_COORD_RUNTIME_VERSION;
 
     esp_zb_platform_config_t platform_cfg = {
@@ -1414,6 +1660,7 @@ esp_err_t zb_coordinator_init(zb_coordinator_event_cb_t event_cb)
     ESP_ERROR_CHECK(esp_zb_start(false));
     s_stack_started = true;
     ESP_LOGI(TAG, "[T+%07.3f] Coordinador Zigbee inicializado (SDK real)", timebase_now_s());
+    event_info_reset("STACK_STARTED");
     emit_event("STACK_STARTED");
     return ESP_OK;
 }
@@ -1429,8 +1676,21 @@ esp_err_t zb_coordinator_set_permit_join(bool enable)
     ESP_LOGI(TAG, "[T+%07.3f] PermitJoin=%s", timebase_now_s(), enable ? "OPEN" : "CLOSED");
     esp_err_t err = enable ? esp_zb_bdb_open_network(180) : esp_zb_bdb_close_network();
     esp_zb_lock_release();
+    event_info_reset(enable ? "PERMIT_JOIN_OPEN" : "PERMIT_JOIN_CLOSED");
+    event_info_set_status(enable ? "open" : "closed");
     emit_event(enable ? "PERMIT_JOIN_OPEN" : "PERMIT_JOIN_CLOSED");
     return err;
+}
+
+esp_err_t zb_coordinator_request_interview(uint16_t short_addr)
+{
+    if (!s_stack_started) {
+        return ESP_ERR_INVALID_STATE;
+    }
+    if (short_addr == 0x0000U || short_addr == 0xFFFFU) {
+        return ESP_ERR_INVALID_ARG;
+    }
+    return interview_request_enqueue(short_addr, "api_request") ? ESP_OK : ESP_ERR_INVALID_STATE;
 }
 
 esp_err_t zb_coordinator_poll(void)
@@ -1470,6 +1730,15 @@ esp_err_t zb_coordinator_get_runtime_state(zb_network_runtime_t *out_state)
         return ESP_ERR_INVALID_ARG;
     }
     *out_state = s_runtime;
+    return ESP_OK;
+}
+
+esp_err_t zb_coordinator_get_last_event_info(zb_coord_event_info_t *out_info)
+{
+    if (out_info == NULL) {
+        return ESP_ERR_INVALID_ARG;
+    }
+    *out_info = s_last_event;
     return ESP_OK;
 }
 
@@ -1564,17 +1833,19 @@ void esp_zb_app_signal_handler(esp_zb_app_signal_t *signal_s)
     ESP_LOGI(TAG, "[T+%07.3f] ZB_SIGNAL %s status=%d", timebase_now_s(), sig_name ? sig_name : "UNKNOWN", (int)st);
 
     if (sig == ESP_ZB_ZDO_SIGNAL_SKIP_STARTUP) {
-        (void)esp_zb_bdb_start_top_level_commissioning(ESP_ZB_BDB_MODE_NETWORK_FORMATION);
-        emit_event("BDB_FORMATION_START");
+        ESP_LOGI(TAG, "[T+%07.3f] Inicializando stack Zigbee para decidir restore/formacion segun NVRAM", timebase_now_s());
+        (void)esp_zb_bdb_start_top_level_commissioning(ESP_ZB_BDB_MODE_INITIALIZATION);
         return;
     }
 
     if (sig == ESP_ZB_BDB_SIGNAL_DEVICE_FIRST_START || sig == ESP_ZB_BDB_SIGNAL_DEVICE_REBOOT) {
         if (st == ESP_OK && esp_zb_bdb_is_factory_new()) {
             (void)esp_zb_bdb_start_top_level_commissioning(ESP_ZB_BDB_MODE_NETWORK_FORMATION);
+            event_info_reset("FACTORY_NEW_FORMATION");
             emit_event("FACTORY_NEW_FORMATION");
         } else if (st == ESP_OK) {
             log_network_runtime_summary("restaurada");
+            event_info_reset("NETWORK_RESTORED");
             emit_event("NETWORK_RESTORED");
             recontact_known_devices();
         }
@@ -1583,6 +1854,7 @@ void esp_zb_app_signal_handler(esp_zb_app_signal_t *signal_s)
 
     if (sig == ESP_ZB_BDB_SIGNAL_FORMATION && st == ESP_OK) {
         log_network_runtime_summary("formada");
+        event_info_reset("NETWORK_FORMED");
         emit_event("NETWORK_FORMED");
         return;
     }
@@ -1593,6 +1865,7 @@ void esp_zb_app_signal_handler(esp_zb_app_signal_t *signal_s)
         if (p != NULL) {
             const uint64_t ieee = ieee_to_u64(p->ieee_addr);
             device_table_update_discovery(ieee, p->device_short_addr, 0, NULL, NULL);
+            deferred_attr_flush_short(p->device_short_addr);
             device_table_inc_counter("device_announce");
 
             zb_trace_meta_t m = {
@@ -1614,6 +1887,11 @@ void esp_zb_app_signal_handler(esp_zb_app_signal_t *signal_s)
             payload[10] = p->capability;
             (void)zb_trace_log_packet(ZB_DIR_RX, &m, payload, sizeof(payload));
             (void)interview_request_enqueue(p->device_short_addr, "device_announce");
+            event_info_reset("DEVICE_ANNOUNCE");
+            event_info_set_device(ieee, p->device_short_addr, 0U);
+            event_info_set_status("announced");
+        } else {
+            event_info_reset("DEVICE_ANNOUNCE");
         }
         emit_event("DEVICE_ANNOUNCE");
         return;
@@ -1625,6 +1903,7 @@ void esp_zb_app_signal_handler(esp_zb_app_signal_t *signal_s)
         if (p != NULL) {
             const uint64_t ieee = ieee_to_u64(p->long_addr);
             device_table_update_device_update(ieee, p->short_addr, p->parent_short, p->status, p->tc_action);
+            deferred_attr_flush_short(p->short_addr);
             zb_coordinator_note_inbound_device_traffic(p->short_addr);
             device_table_inc_counter("device_update");
             ESP_LOGI(TAG, "[T+%07.3f] DeviceUpdate short=0x%04X status=%u tc_action=%u parent=0x%04X", timebase_now_s(), p->short_addr,
@@ -1634,6 +1913,10 @@ void esp_zb_app_signal_handler(esp_zb_app_signal_t *signal_s)
                 device_table_inc_counter("device_rejoin");
                 /* Esperar a DEVICE_ANNCE o autorizacion OK para evitar entrevistas sobre rejoins rechazados. */
             }
+            event_info_reset("DEVICE_UPDATE");
+            event_info_set_device(ieee, p->short_addr, 0U);
+            event_info_set_status((p->status == ESP_ZB_ZDO_STANDARD_DEV_SECURED_REJOIN || p->status == ESP_ZB_ZDO_STANDARD_DEV_UNSECURED_JOIN ||
+                                   p->status == ESP_ZB_ZDO_STANDARD_DEV_TC_REJOIN) ? "rejoin" : "update");
             emit_event("DEVICE_UPDATE");
         }
         return;
@@ -1643,10 +1926,15 @@ void esp_zb_app_signal_handler(esp_zb_app_signal_t *signal_s)
         const esp_zb_zdo_signal_device_authorized_params_t *p =
             (const esp_zb_zdo_signal_device_authorized_params_t *)esp_zb_app_signal_get_params(signal_s->p_app_signal);
         if (p != NULL) {
-            device_table_update_authorization(ieee_to_u64(p->long_addr), p->short_addr, p->authorization_type, p->authorization_status);
+            const uint64_t ieee = ieee_to_u64(p->long_addr);
+            device_table_update_authorization(ieee, p->short_addr, p->authorization_type, p->authorization_status);
+            deferred_attr_flush_short(p->short_addr);
             if (p->authorization_status == 0U) {
                 ESP_LOGI(TAG, "[T+%07.3f] DeviceAuthorized OK short=0x%04X type=%u", timebase_now_s(), p->short_addr,
                          (unsigned)p->authorization_type);
+                event_info_reset("DEVICE_AUTHORIZED");
+                event_info_set_device(ieee, p->short_addr, 0U);
+                event_info_set_status("authorized");
                 emit_event("DEVICE_AUTHORIZED");
                 (void)interview_request_enqueue(p->short_addr, "device_authorized");
             } else {
@@ -1654,6 +1942,9 @@ void esp_zb_app_signal_handler(esp_zb_app_signal_t *signal_s)
                          "[T+%07.3f] DeviceAuthorized FAIL short=0x%04X type=%u auth_status=%u; probable rejoin a red antigua, resetear el dispositivo final",
                          timebase_now_s(), p->short_addr, (unsigned)p->authorization_type, (unsigned)p->authorization_status);
                 interview_cancel(p->short_addr, "authorization_failed");
+                event_info_reset("DEVICE_AUTH_FAILED");
+                event_info_set_device(ieee, p->short_addr, 0U);
+                event_info_set_status("failed");
                 emit_event("DEVICE_AUTH_FAILED");
             }
         }
@@ -1664,7 +1955,13 @@ void esp_zb_app_signal_handler(esp_zb_app_signal_t *signal_s)
         const esp_zb_zdo_signal_leave_indication_params_t *p =
             (const esp_zb_zdo_signal_leave_indication_params_t *)esp_zb_app_signal_get_params(signal_s->p_app_signal);
         if (p != NULL) {
-            device_table_mark_leave(ieee_to_u64(p->device_addr), p->short_addr, p->rejoin != 0U);
+            const uint64_t ieee = ieee_to_u64(p->device_addr);
+            device_table_mark_leave(ieee, p->short_addr, p->rejoin != 0U);
+            event_info_reset("DEVICE_LEAVE");
+            event_info_set_device(ieee, p->short_addr, 0U);
+            event_info_set_status((p->rejoin != 0U) ? "rejoin" : "left");
+        } else {
+            event_info_reset("DEVICE_LEAVE");
         }
         emit_event("DEVICE_LEAVE");
         return;

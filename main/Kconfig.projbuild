@@ -25,4 +25,10 @@ menu "MQTT Bridge"
         help
             Client ID usado por el cliente MQTT del coordinador.
 
+    config MQTT_BRIDGE_BASE_TOPIC
+        string "MQTT base topic"
+        default "esp32_zigbee"
+        help
+            Prefijo MQTT usado para publicar estado del bridge, dispositivos y recibir ordenes.
+
 endmenu

@@ -13,6 +13,21 @@ typedef void (*zb_coordinator_event_cb_t)(const char *event_name);
 
 #define ZB_COORD_MAX_INTERVIEW_DUMP 32
 #define ZB_COORD_MAX_IDENTITY_DUMP 16
+#define ZB_COORD_EVENT_NAME_MAX 40
+#define ZB_COORD_EVENT_STATUS_MAX 24
+
+typedef struct {
+    char name[ZB_COORD_EVENT_NAME_MAX];
+    char status[ZB_COORD_EVENT_STATUS_MAX];
+    bool has_device;
+    bool has_status;
+    uint64_t ieee;
+    uint16_t short_addr;
+    uint8_t endpoint;
+    uint16_t profile_id;
+    uint16_t cluster_id;
+    double ts_s;
+} zb_coord_event_info_t;
 
 typedef struct {
     bool used;
@@ -58,8 +73,10 @@ typedef struct {
 
 esp_err_t zb_coordinator_init(zb_coordinator_event_cb_t event_cb);
 esp_err_t zb_coordinator_set_permit_join(bool enable);
+esp_err_t zb_coordinator_request_interview(uint16_t short_addr);
 esp_err_t zb_coordinator_poll(void);
 esp_err_t zb_coordinator_get_runtime_state(zb_network_runtime_t *out_state);
+esp_err_t zb_coordinator_get_last_event_info(zb_coord_event_info_t *out_info);
 esp_err_t zb_coordinator_local_reset(void);
 void zb_coordinator_factory_reset(void);
 void zb_coordinator_get_ram_snapshot(zb_coordinator_ram_snapshot_t *out);
