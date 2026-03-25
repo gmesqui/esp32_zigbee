@@ -86,6 +86,13 @@ static constexpr const char *kOutputMode = "json";
 static constexpr bool kAvailabilityEnabled = true;
 static constexpr bool kIncludeDeviceInformation = false;
 
+struct availability_cache_entry_t {
+    bool used = false;
+    uint64_t ieee = 0;
+    uint16_t short_addr = 0;
+    bool online = false;
+};
+
 typedef struct {
     char topic[kTopicMax];
     char payload[kPayloadMax];
@@ -361,6 +368,8 @@ private:
     esp_err_t publish_single_attribute(const device_record_t &dev, const std::string &attribute, bool retain, int endpoint_filter = -1);
     esp_err_t publish_response(const char *suffix, cJSON *json);
     esp_err_t send_on_off_command(const device_record_t &dev, uint8_t endpoint, bool on);
+    void reset_availability_cache();
+    bool should_publish_availability(const device_record_t &dev, bool online);
 
     static void on_eth_event(void *arg, esp_event_base_t event_base, int32_t event_id, void *event_data);
     static void on_ip_event(void *arg, esp_event_base_t event_base, int32_t event_id, void *event_data);
@@ -380,6 +389,7 @@ private:
     bool publish_definitions_pending_ = false;
     bool publish_states_pending_ = false;
     bool publish_online_pending_ = false;
+    bool reset_availability_cache_pending_ = false;
     bool restart_pending_ = false;
     TickType_t next_health_tick_ = 0;
     TickType_t permit_join_deadline_ = 0;
@@ -396,6 +406,7 @@ private:
     esp_event_handler_instance_t eth_event_instance_ = nullptr;
     esp_event_handler_instance_t got_ip_instance_ = nullptr;
     esp_event_handler_instance_t lost_ip_instance_ = nullptr;
+    availability_cache_entry_t availability_cache_[DEVICE_TABLE_MAX_DEVICES] = {};
 };
 
 static Bridge s_bridge;
@@ -1089,10 +1100,55 @@ esp_err_t Bridge::publish_device_state(const device_record_t &dev, bool retain, 
         return ESP_ERR_NOT_FOUND;
     }
     ESP_RETURN_ON_ERROR(publish_json(base, root, retain, 1), TAG, "No se pudo publicar estado");
+    const bool online = (dev.in_network && !dev.silent);
+    if (!should_publish_availability(dev, online)) {
+        return ESP_OK;
+    }
     cJSON *availability = cJSON_CreateObject();
     ESP_RETURN_ON_FALSE(availability != nullptr, ESP_ERR_NO_MEM, TAG, "Sin memoria availability");
-    cJSON_AddStringToObject(availability, "state", (dev.in_network && !dev.silent) ? "online" : "offline");
+    cJSON_AddStringToObject(availability, "state", online ? "online" : "offline");
     return publish_json(base + "/availability", availability, retain, 1);
+}
+
+void Bridge::reset_availability_cache()
+{
+    for (size_t i = 0; i < DEVICE_TABLE_MAX_DEVICES; ++i) {
+        availability_cache_[i] = {};
+    }
+}
+
+bool Bridge::should_publish_availability(const device_record_t &dev, bool online)
+{
+    availability_cache_entry_t *free_slot = nullptr;
+    for (size_t i = 0; i < DEVICE_TABLE_MAX_DEVICES; ++i) {
+        availability_cache_entry_t *entry = &availability_cache_[i];
+        if (!entry->used) {
+            if (free_slot == nullptr) {
+                free_slot = entry;
+            }
+            continue;
+        }
+        const bool same_ieee = (dev.ieee != 0U && entry->ieee == dev.ieee);
+        const bool same_short_only = (dev.ieee == 0U && entry->ieee == 0U && entry->short_addr == dev.short_addr);
+        if (!same_ieee && !same_short_only) {
+            continue;
+        }
+        if (entry->online == online && entry->short_addr == dev.short_addr) {
+            return false;
+        }
+        entry->online = online;
+        entry->ieee = dev.ieee;
+        entry->short_addr = dev.short_addr;
+        return true;
+    }
+    if (free_slot == nullptr) {
+        free_slot = &availability_cache_[0];
+    }
+    free_slot->used = true;
+    free_slot->ieee = dev.ieee;
+    free_slot->short_addr = dev.short_addr;
+    free_slot->online = online;
+    return true;
 }
 
 esp_err_t Bridge::publish_selected_device_state(uint64_t ieee, uint16_t short_addr, bool retain)
@@ -1596,6 +1652,10 @@ void Bridge::poll()
         next_health_tick_ = 0;
         return;
     }
+    if (reset_availability_cache_pending_) {
+        reset_availability_cache();
+        reset_availability_cache_pending_ = false;
+    }
     if (publish_online_pending_) {
         (void)publish_bridge_state("online");
         publish_online_pending_ = false;
@@ -1729,6 +1789,7 @@ void Bridge::on_mqtt_event(void *arg, esp_event_base_t event_base, int32_t event
     case MQTT_EVENT_CONNECTED: {
         self->mqtt_connected_ = true;
         self->publish_online_pending_ = true;
+        self->reset_availability_cache_pending_ = true;
         self->queue_full_publish();
         const std::string sub = full_topic("#");
         const int msg_id = esp_mqtt_client_subscribe(self->mqtt_client_, sub.c_str(), 1);
