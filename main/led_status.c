@@ -10,6 +10,13 @@
 
 static const gpio_num_t LED_GPIO = GPIO_NUM_27;
 static const uint32_t LED_STRIP_LEN = 1;
+static const TickType_t HEARTBEAT_PERIOD_TICKS = pdMS_TO_TICKS(2200);
+static const uint8_t HEARTBEAT_WAVE[] = {
+    0, 1, 2, 4, 7, 11, 15, 20,
+    25, 30, 35, 40, 44, 48, 51, 53,
+    54, 53, 51, 48, 44, 40, 35, 30,
+    25, 20, 15, 11, 7, 4, 2, 1,
+};
 static led_strip_handle_t s_strip = NULL;
 static led_base_state_t s_base = LED_BASE_BOOT;
 static TickType_t s_pulse_deadline_tick = 0;
@@ -17,13 +24,55 @@ static uint8_t s_pulse_r = 0;
 static uint8_t s_pulse_g = 0;
 static uint8_t s_pulse_b = 0;
 static TickType_t s_heartbeat_tick = 0;
-static bool s_heartbeat_high = false;
 
 typedef struct {
     uint8_t r;
     uint8_t g;
     uint8_t b;
 } rgb_t;
+
+static uint8_t sat_add_u8(uint8_t base, uint8_t delta)
+{
+    const uint16_t sum = (uint16_t)base + delta;
+    return (sum > UINT8_MAX) ? UINT8_MAX : (uint8_t)sum;
+}
+
+static uint8_t blend_u8(uint8_t a, uint8_t b, uint8_t mix)
+{
+    const uint16_t inv_mix = (uint16_t)UINT8_MAX - mix;
+    const uint16_t blended = (uint16_t)a * inv_mix + (uint16_t)b * mix;
+    return (uint8_t)((blended + 127) / UINT8_MAX);
+}
+
+static uint8_t heartbeat_wave_mix(TickType_t now)
+{
+    TickType_t elapsed = now - s_heartbeat_tick;
+    const size_t sample_count = sizeof(HEARTBEAT_WAVE) / sizeof(HEARTBEAT_WAVE[0]);
+
+    if (elapsed >= HEARTBEAT_PERIOD_TICKS) {
+        elapsed %= HEARTBEAT_PERIOD_TICKS;
+        s_heartbeat_tick = now - elapsed;
+    }
+
+    size_t idx = ((uint64_t)elapsed * sample_count) / HEARTBEAT_PERIOD_TICKS;
+    if (idx >= sample_count) {
+        idx = sample_count - 1;
+    }
+    return (uint8_t)(((uint16_t)HEARTBEAT_WAVE[idx] * UINT8_MAX) / 54);
+}
+
+static rgb_t ready_closed_wave_color(TickType_t now)
+{
+    const rgb_t green = {.r = 0, .g = 26, .b = 0};
+    const rgb_t blue = {.r = 0, .g = 2, .b = 30};
+    const uint8_t mix = heartbeat_wave_mix(now);
+
+    return (rgb_t){
+        .r = blend_u8(green.r, blue.r, mix),
+        .g = blend_u8(green.g, blue.g, mix),
+        .b = blend_u8(green.b, blue.b, mix),
+    };
+}
 
 static rgb_t base_color(led_base_state_t state)
 {
@@ -74,7 +123,6 @@ void led_status_init(void)
     s_base = LED_BASE_BOOT;
     s_pulse_deadline_tick = 0;
     s_heartbeat_tick = xTaskGetTickCount();
-    s_heartbeat_high = false;
     apply_color(0, 0, 18);
 }
 
@@ -107,32 +155,15 @@ void led_status_poll(void)
     rgb_t b = base_color(s_base);
     const TickType_t now = xTaskGetTickCount();
     if (s_base == LED_BASE_READY_CLOSED) {
-        const TickType_t period = s_heartbeat_high ? pdMS_TO_TICKS(120) : pdMS_TO_TICKS(1800);
-        if ((int32_t)(now - s_heartbeat_tick) >= 0) {
-            s_heartbeat_high = !s_heartbeat_high;
-            s_heartbeat_tick = now + period;
-        }
-        if (s_heartbeat_high) {
-            b.g = (uint8_t)(b.g + 8); /* respiracion/pulso leve en verde */
-        }
+        b = ready_closed_wave_color(now);
     } else {
-        s_heartbeat_high = false;
-        s_heartbeat_tick = now + pdMS_TO_TICKS(1800);
+        s_heartbeat_tick = now;
     }
 
     if ((int32_t)(now - s_pulse_deadline_tick) < 0) {
-        uint8_t r = b.r + s_pulse_r;
-        uint8_t g = b.g + s_pulse_g;
-        uint8_t bl = b.b + s_pulse_b;
-        if (r < b.r) {
-            r = 255;
-        }
-        if (g < b.g) {
-            g = 255;
-        }
-        if (bl < b.b) {
-            bl = 255;
-        }
+        uint8_t r = sat_add_u8(b.r, s_pulse_r);
+        uint8_t g = sat_add_u8(b.g, s_pulse_g);
+        uint8_t bl = sat_add_u8(b.b, s_pulse_b);
         apply_color(r, g, bl);
     } else {
         apply_color(b.r, b.g, b.b);
