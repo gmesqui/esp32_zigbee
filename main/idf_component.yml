@@ -1,6 +1,6 @@
 dependencies:
-  espressif/led_strip: "*"
-  espressif/esp-zboss-lib: "*"
-  espressif/esp-zigbee-lib: "*"
-  espressif/mdns: "^1.10.1"
-  espressif/enc28j60: "^1.0.1"
+  espressif/led_strip: '*'
+  espressif/esp-zboss-lib: '*'
+  espressif/esp-zigbee-lib: '*'
+  espressif/mdns: ^1.10.1
+  espressif/enc28j60: ^1.0.1

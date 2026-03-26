@@ -2,6 +2,7 @@
 #include <string.h>
 
 #include "driver/gpio.h"
+#include "esp_heap_caps.h"
 #include "esp_log.h"
 #include "esp_wifi.h"
 #include "nvs_flash.h"
@@ -9,8 +10,10 @@
 #include "freertos/task.h"
 
 #include "device_table.h"
+#include "bridge_core.h"
+#include "ethernet_link.h"
 #include "led_status.h"
-#include "mqtt_bridge.h"
+#include "matter_bridge.h"
 #include "serial_cmd.h"
 #include "timebase.h"
 #include "zb_coordinator.h"
@@ -20,6 +23,7 @@ static const gpio_num_t BOOT_BUTTON_GPIO = GPIO_NUM_28;
 static const TickType_t DEVICE_TABLE_PERSIST_PERIOD_TICKS = pdMS_TO_TICKS(250);
 static const uint32_t DEVICE_TABLE_PERSIST_TASK_STACK = 4096;
 static const UBaseType_t DEVICE_TABLE_PERSIST_TASK_PRIO = 4;
+static const TickType_t MATTER_INIT_DELAY_TICKS = pdMS_TO_TICKS(2000);
 
 static void device_table_persist_task(void *arg)
 {
@@ -53,6 +57,14 @@ static void disable_wifi_radio(void)
 #endif
 }
 
+static void log_memory_snapshot(const char *stage)
+{
+    ESP_LOGI(TAG, "[T+%07.3f] Mem %s: heap=%u internal=%u",
+             timebase_now_s(), stage,
+             (unsigned)esp_get_free_heap_size(),
+             (unsigned)heap_caps_get_free_size(MALLOC_CAP_INTERNAL));
+}
+
 static void on_zb_event(const char *event_name)
 {
     if (event_name != NULL && strstr(event_name, "FROM_RX_MSG_") == event_name) {
@@ -78,7 +90,7 @@ static void on_zb_event(const char *event_name)
             led_status_set_base(LED_BASE_READY_OPEN);
         }
     }
-    (void)mqtt_bridge_notify_zigbee_event(event_name);
+    bridge_core_request_sync();
     ESP_LOGI(TAG, "[T+%07.3f] EVT %s", timebase_now_s(), event_name);
 }
 
@@ -92,16 +104,20 @@ void app_main(void)
     ESP_ERROR_CHECK(nvs_err);
     timebase_init();
     device_table_init();
+    bridge_core_init();
     led_status_init();
     led_status_set_base(LED_BASE_BOOT);
     disable_wifi_radio();
 
     ESP_LOGI(TAG, "[T+%07.3f] Boot coordinador Zigbee base", timebase_now_s());
-    const esp_err_t bridge_err = mqtt_bridge_init();
-    if (bridge_err != ESP_OK) {
-        ESP_LOGE(TAG, "[T+%07.3f] mqtt_bridge_init fallo: %s", timebase_now_s(), esp_err_to_name(bridge_err));
+    log_memory_snapshot("boot");
+    const esp_err_t ethernet_err = ethernet_link_init();
+    if (ethernet_err != ESP_OK) {
+        ESP_LOGE(TAG, "[T+%07.3f] ethernet_link_init fallo: %s", timebase_now_s(), esp_err_to_name(ethernet_err));
     }
+    log_memory_snapshot("post-ethernet");
     ESP_ERROR_CHECK(zb_coordinator_init(on_zb_event));
+    log_memory_snapshot("post-zigbee-init");
 
     gpio_config_t io_conf = {
         .pin_bit_mask = (1ULL << BOOT_BUTTON_GPIO),
@@ -120,6 +136,8 @@ void app_main(void)
     bool button_prev_pressed = false;
     TickType_t last_button_tick = 0;
     bool zigbee_poll_degraded = false;
+    bool matter_init_attempted = false;
+    const TickType_t matter_init_deadline = xTaskGetTickCount() + MATTER_INIT_DELAY_TICKS;
     const TickType_t debounce_ticks = pdMS_TO_TICKS(120);
     while (true) {
         const esp_err_t poll_err = zb_coordinator_poll();
@@ -156,6 +174,16 @@ void app_main(void)
         }
         button_prev_pressed = button_pressed;
 
+        if (!matter_init_attempted && (int32_t)(now_tick - matter_init_deadline) >= 0) {
+            matter_init_attempted = true;
+            log_memory_snapshot("pre-matter-init");
+            const esp_err_t matter_err = matter_bridge_init();
+            if (matter_err != ESP_OK) {
+                ESP_LOGE(TAG, "[T+%07.3f] matter_bridge_init fallo: %s", timebase_now_s(), esp_err_to_name(matter_err));
+            }
+            log_memory_snapshot("post-matter-init");
+        }
+
         if (permit_join_open && permit_join_deadline != 0 && (int32_t)(now_tick - permit_join_deadline) >= 0) {
             permit_join_open = false;
             permit_join_deadline = 0;
@@ -163,6 +191,8 @@ void app_main(void)
             led_status_set_base(LED_BASE_READY_CLOSED);
             ESP_LOGI(TAG, "[T+%07.3f] Permit join expirado (180s) -> CERRADO", timebase_now_s());
         }
+        bridge_core_poll();
+        matter_bridge_poll();
         led_status_poll();
         vTaskDelay(pdMS_TO_TICKS(25));
     }

@@ -8,6 +8,8 @@
 #include "freertos/task.h"
 
 #include "device_table.h"
+#include "bridge_core.h"
+#include "matter_bridge.h"
 #include "timebase.h"
 #include "zb_coordinator.h"
 
@@ -17,7 +19,7 @@ static void serial_cmd_task(void *arg)
 {
     (void)arg;
     ESP_LOGI(TAG,
-             "[T+%07.3f] Comandos serie activos. Teclas: '1'=dump JSON, '2'=borrar zb_cache + reboot, '3'=local reset Zigbee + borrar zb_cache, '4'=factory reset Zigbee + borrar zb_cache, '5'=reboot MCU",
+             "[T+%07.3f] Comandos serie activos. Teclas: '1'=dump JSON, '2'=borrar zb_cache + reboot, '3'=local reset Zigbee + borrar zb_cache, '4'=factory reset Zigbee + borrar zb_cache, '5'=reboot MCU, '6'=dump bridge registry, '7'=borrar bridge registry + reboot, '8'=factory reset Zigbee + borrar zb_cache + bridge registry, '9'=factory reset Matter + reboot",
              timebase_now_s());
     while (true) {
         int ch = fgetc(stdin);
@@ -43,6 +45,24 @@ static void serial_cmd_task(void *arg)
             zb_coordinator_factory_reset();
         } else if (ch == '5') {
             ESP_LOGW(TAG, "[T+%07.3f] Comando recibido: 5 (reboot MCU)", timebase_now_s());
+            vTaskDelay(pdMS_TO_TICKS(100));
+            esp_restart();
+        } else if (ch == '6') {
+            ESP_LOGI(TAG, "[T+%07.3f] Comando recibido: 6 (dump bridge registry)", timebase_now_s());
+            bridge_core_dump_registry_json();
+        } else if (ch == '7') {
+            ESP_LOGW(TAG, "[T+%07.3f] Comando recibido: 7 (borrar bridge registry + reboot)", timebase_now_s());
+            bridge_core_reset_registry();
+            vTaskDelay(pdMS_TO_TICKS(100));
+            esp_restart();
+        } else if (ch == '8') {
+            ESP_LOGW(TAG, "[T+%07.3f] Comando recibido: 8 (factory reset Zigbee + borrar zb_cache + bridge registry)", timebase_now_s());
+            bridge_core_reset_registry();
+            device_table_clear_cache_and_runtime();
+            zb_coordinator_factory_reset();
+        } else if (ch == '9') {
+            ESP_LOGW(TAG, "[T+%07.3f] Comando recibido: 9 (factory reset Matter + reboot)", timebase_now_s());
+            matter_bridge_factory_reset();
             vTaskDelay(pdMS_TO_TICKS(100));
             esp_restart();
         }

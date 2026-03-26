@@ -3,6 +3,7 @@
 #include <stdbool.h>
 #include <string.h>
 
+#include "driver/rmt.h"
 #include "driver/gpio.h"
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
@@ -10,6 +11,7 @@
 
 static const gpio_num_t LED_GPIO = GPIO_NUM_27;
 static const uint32_t LED_STRIP_LEN = 1;
+static const rmt_channel_t LED_RMT_CHANNEL = RMT_CHANNEL_0;
 static const TickType_t HEARTBEAT_PERIOD_TICKS = pdMS_TO_TICKS(2200);
 static const uint8_t HEARTBEAT_WAVE[] = {
     0, 1, 2, 4, 7, 11, 15, 20,
@@ -17,7 +19,7 @@ static const uint8_t HEARTBEAT_WAVE[] = {
     54, 53, 51, 48, 44, 40, 35, 30,
     25, 20, 15, 11, 7, 4, 2, 1,
 };
-static led_strip_handle_t s_strip = NULL;
+static led_strip_t *s_strip = NULL;
 static led_base_state_t s_base = LED_BASE_BOOT;
 static TickType_t s_pulse_deadline_tick = 0;
 static uint8_t s_pulse_r = 0;
@@ -96,30 +98,20 @@ static void apply_color(uint8_t r, uint8_t g, uint8_t b)
     if (s_strip == NULL) {
         return;
     }
-    (void)led_strip_set_pixel(s_strip, 0, r, g, b);
-    (void)led_strip_refresh(s_strip);
+    (void)s_strip->set_pixel(s_strip, 0, r, g, b);
+    (void)s_strip->refresh(s_strip, 100);
 }
 
 void led_status_init(void)
 {
-    led_strip_config_t strip_config = {
-        .strip_gpio_num = LED_GPIO,
-        .max_leds = LED_STRIP_LEN,
-        .led_model = LED_MODEL_WS2812,
-        .color_component_format = LED_STRIP_COLOR_COMPONENT_FMT_GRB,
-        .flags = {
-            .invert_out = false,
-        },
-    };
-    led_strip_rmt_config_t rmt_config = {
-        .clk_src = RMT_CLK_SRC_DEFAULT,
-        .resolution_hz = 10 * 1000 * 1000,
-        .mem_block_symbols = 0,
-        .flags = {
-            .with_dma = false,
-        },
-    };
-    (void)led_strip_new_rmt_device(&strip_config, &rmt_config, &s_strip);
+    rmt_config_t tx_config = RMT_DEFAULT_CONFIG_TX(LED_GPIO, LED_RMT_CHANNEL);
+    tx_config.clk_div = 2;
+    tx_config.mem_block_num = 1;
+    (void)rmt_config(&tx_config);
+    (void)rmt_driver_install(tx_config.channel, 0, 0);
+
+    led_strip_config_t strip_config = LED_STRIP_DEFAULT_CONFIG(LED_STRIP_LEN, (led_strip_dev_t)LED_RMT_CHANNEL);
+    s_strip = led_strip_new_rmt_ws2812(&strip_config);
     s_base = LED_BASE_BOOT;
     s_pulse_deadline_tick = 0;
     s_heartbeat_tick = xTaskGetTickCount();
