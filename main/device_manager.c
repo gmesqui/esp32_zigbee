@@ -138,13 +138,16 @@ void dm_touch(device_record_t *dev, uint8_t lqi, int8_t rssi)
 {
     if (!dev) return;
     dev->last_seen_ms = utils_uptime_ms();
-    dev->last_lqi     = lqi;
-    dev->last_rssi    = rssi;
+    if (!(lqi == 0 && rssi == 0)) {
+        dev->last_lqi  = lqi;
+        dev->last_rssi = rssi;
+    }
 
     if (!dev->online) {
         dev->online = true;
         ZB_LOG("DEVICE %s ONLINE nwk=0x%04X lqi=%u rssi=%d",
-               dm_display_name(dev), dev->nwk_addr, lqi, rssi);
+               dm_display_name(dev), dev->nwk_addr,
+               dev->last_lqi, dev->last_rssi);
         dm_emit_availability(dev);
     }
 }

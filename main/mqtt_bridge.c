@@ -43,6 +43,7 @@ static void direct_pub(const char *topic, const char *payload,
 {
     esp_mqtt_client_handle_t c = mqtt_manager_get_client();
     if (!c) return;
+    ZB_LOG("MQTT TX topic=%s payload=%s", topic, payload);
     esp_mqtt_client_publish(c, topic, payload, (int)strlen(payload), qos, retain);
 }
 

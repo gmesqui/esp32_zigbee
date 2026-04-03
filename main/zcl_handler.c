@@ -11,6 +11,7 @@
 #include <inttypes.h>
 #include "freertos/FreeRTOS.h"
 #include "freertos/semphr.h"
+#include "zb_osif_platform.h"
 
 // ---------------------------------------------------------------------------
 // Attribute value cache
@@ -360,7 +361,7 @@ esp_err_t zcl_on_read_attr_resp(const esp_zb_zcl_cmd_read_attr_resp_message_t *m
     device_record_t *dev = dm_find_by_nwk(src_nwk);
     if (!dev) return ESP_OK;
 
-    dm_touch(dev, 0, 0);
+    dm_touch(dev, esp_zb_rssi_to_lqi(msg->info.header.rssi), msg->info.header.rssi);
 
     const esp_zb_zcl_read_attr_resp_variable_t *var = msg->variables;
     bool any_changed = false;

@@ -118,7 +118,9 @@ device_record_t *dm_get_or_create(uint64_t ieee, uint16_t nwk_addr);
  *  Marks dirty so the new short address gets persisted. */
 void dm_update_nwk(device_record_t *dev, uint16_t new_nwk_addr);
 
-/** Record a radio contact (updates last_seen, lqi, rssi, online=true). */
+/** Record a radio contact (updates last_seen, online=true).
+ *  Passing lqi=0 and rssi=0 means "radio metrics unknown" and preserves the
+ *  previous last_lqi/last_rssi values. */
 void dm_touch(device_record_t *dev, uint8_t lqi, int8_t rssi);
 
 /** Change online/offline state and emit availability event on transition. */

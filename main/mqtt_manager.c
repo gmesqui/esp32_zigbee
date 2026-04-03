@@ -80,6 +80,7 @@ static void drain_queue(void)
     mqtt_msg_t msg;
     while (s_connected &&
            xQueueReceive(s_queue, &msg, pdMS_TO_TICKS(100)) == pdTRUE) {
+        ZB_LOG("MQTT TX topic=%s payload=%s", msg.topic, msg.payload);
         esp_mqtt_client_publish(s_client, msg.topic, msg.payload,
                                  (int)strlen(msg.payload),
                                  msg.qos, msg.retain ? 1 : 0);
