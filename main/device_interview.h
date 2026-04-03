@@ -36,6 +36,10 @@ void di_enqueue(device_record_t *dev);
  *  will be matched/created and any pending ZCL attributes replayed. */
 void di_trigger_ieee_resolve(uint16_t nwk_addr);
 
+/** Probe restored always-on devices after coordinator startup.
+ *  Sends read requests to recover availability and refresh cached state. */
+void di_startup_probe_known_devices(void);
+
 // ---------------------------------------------------------------------------
 // ZDO response callbacks — registered with the SDK and called from Zigbee
 // task context.  Signatures match the esp_zb_zdo_*_callback_t typedefs.

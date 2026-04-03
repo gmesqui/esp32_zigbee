@@ -152,6 +152,133 @@ static void send_read_power_cfg(uint16_t nwk_addr, uint8_t ep_id)
     esp_zb_zcl_read_attr_cmd_req(&cmd);
 }
 
+typedef struct {
+    uint16_t cluster_id;
+    uint8_t  attr_count;
+    uint16_t attrs[3];
+} startup_refresh_entry_t;
+
+static const startup_refresh_entry_t k_startup_refresh_table[] = {
+    { 0x0006, 1, { 0x0000 } },                 // On/Off
+    { 0x0008, 1, { 0x0000 } },                 // Level
+    { 0x0300, 3, { 0x0000, 0x0001, 0x0007 } }, // Color control
+    { 0x0402, 1, { 0x0000 } },                 // Temperature
+    { 0x0405, 1, { 0x0000 } },                 // Humidity
+    { 0x0403, 1, { 0x0000 } },                 // Pressure
+    { 0x0400, 1, { 0x0000 } },                 // Illuminance
+    { 0x0406, 1, { 0x0000 } },                 // Occupancy
+    { 0x0500, 1, { 0x0002 } },                 // IAS Zone status
+    { 0x0B04, 1, { 0x050B } },                 // Active power
+};
+
+typedef struct {
+    uint8_t dev_idx;
+    bool    active;
+} startup_probe_ctx_t;
+
+static startup_probe_ctx_t g_probe_ctx;
+
+static void startup_probe_step(uint8_t dev_idx);
+static void startup_probe_alarm(uint8_t dev_idx);
+
+static void send_read_attrs(uint16_t nwk_addr, uint8_t ep_id,
+                            uint16_t cluster_id, uint8_t attr_count,
+                            const uint16_t *attrs)
+{
+    if (!attrs || attr_count == 0) return;
+
+    esp_zb_zcl_read_attr_cmd_t cmd = {
+        .zcl_basic_cmd = {
+            .src_endpoint          = COORD_ENDPOINT,
+            .dst_addr_u.addr_short = nwk_addr,
+            .dst_endpoint          = ep_id,
+        },
+        .address_mode = ESP_ZB_APS_ADDR_MODE_16_ENDP_PRESENT,
+        .clusterID    = cluster_id,
+        .attr_number  = attr_count,
+        .attr_field   = (uint16_t *)attrs,
+    };
+    esp_zb_zcl_read_attr_cmd_req(&cmd);
+}
+
+static bool endpoint_has_in_cluster(const endpoint_record_t *ep, uint16_t cluster_id)
+{
+    if (!ep) return false;
+    for (int i = 0; i < ep->in_cluster_count; i++) {
+        if (ep->in_clusters[i] == cluster_id) return true;
+    }
+    return false;
+}
+
+static void probe_device_state(device_record_t *dev)
+{
+    if (!dev) return;
+
+    uint8_t basic_ep = 0;
+    if (dm_has_in_cluster(dev, 0x0000, &basic_ep)) {
+        ZB_LOG("STARTUP_PROBE %s READ_BASIC ep=%u",
+               dm_display_name(dev), basic_ep);
+        send_read_basic(dev->nwk_addr, basic_ep);
+    }
+
+    for (int e = 0; e < dev->endpoint_count; e++) {
+        endpoint_record_t *ep = &dev->endpoints[e];
+        if (ep->endpoint_id == 0) continue;
+
+        for (size_t i = 0; i < sizeof(k_startup_refresh_table) / sizeof(k_startup_refresh_table[0]); i++) {
+            const startup_refresh_entry_t *entry = &k_startup_refresh_table[i];
+            if (!endpoint_has_in_cluster(ep, entry->cluster_id)) continue;
+
+            ZB_LOG("STARTUP_PROBE %s READ cluster=%s ep=%u attrs=%u",
+                   dm_display_name(dev), utils_cluster_name(entry->cluster_id),
+                   ep->endpoint_id, entry->attr_count);
+            send_read_attrs(dev->nwk_addr, ep->endpoint_id, entry->cluster_id,
+                            entry->attr_count, entry->attrs);
+        }
+    }
+}
+
+static void startup_probe_schedule_next(uint8_t current_idx)
+{
+    for (uint8_t idx = current_idx + 1; idx < MAX_DEVICES; idx++) {
+        device_record_t *dev = dm_get_by_index(idx);
+        if (!dev || !dev->in_use) continue;
+        if (dev->state < DEV_STATE_INTERVIEWED) continue;
+        if (dev->is_sleepy) continue;
+
+        g_probe_ctx.dev_idx = idx;
+        g_probe_ctx.active = true;
+        esp_zb_scheduler_alarm(startup_probe_alarm, idx, 1200);
+        return;
+    }
+
+    g_probe_ctx.active = false;
+}
+
+static void startup_probe_alarm(uint8_t dev_idx)
+{
+    startup_probe_step(dev_idx);
+}
+
+static void startup_probe_step(uint8_t dev_idx)
+{
+    if (g_ictx.active) {
+        esp_zb_scheduler_alarm(startup_probe_alarm, dev_idx, 1500);
+        return;
+    }
+
+    device_record_t *dev = dm_get_by_index(dev_idx);
+    if (!dev || !dev->in_use || dev->state < DEV_STATE_INTERVIEWED || dev->is_sleepy) {
+        startup_probe_schedule_next(dev_idx);
+        return;
+    }
+
+    ZB_LOG("STARTUP_PROBE %s begin (%s)",
+           dm_display_name(dev), dev->online ? "already-online" : "offline");
+    probe_device_state(dev);
+    startup_probe_schedule_next(dev_idx);
+}
+
 // ---------------------------------------------------------------------------
 // Advance interview to next step / finish
 // ---------------------------------------------------------------------------
@@ -353,6 +480,7 @@ static void start_interview(uint8_t dev_idx)
 void di_init(void)
 {
     memset(&g_ictx, 0, sizeof(g_ictx));
+    memset(&g_probe_ctx, 0, sizeof(g_probe_ctx));
     g_iq_head = g_iq_tail = g_iq_count = 0;
 }
 
@@ -388,6 +516,12 @@ void di_trigger_ieee_resolve(uint16_t nwk_addr)
     ZB_LOG("ZDO IEEE_ADDR_REQ nwk=0x%04X", nwk_addr);
     esp_zb_zdo_ieee_addr_req(&p, di_on_ieee_addr_resp,
                               (void *)(uintptr_t)nwk_addr);
+}
+
+void di_startup_probe_known_devices(void)
+{
+    if (g_probe_ctx.active) return;
+    startup_probe_schedule_next((uint8_t)-1);
 }
 
 // ---------------------------------------------------------------------------

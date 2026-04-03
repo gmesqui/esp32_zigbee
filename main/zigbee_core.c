@@ -83,6 +83,7 @@ void esp_zb_app_signal_handler(esp_zb_app_signal_t *signal_struct)
                 s_network_ready = true;
                 button_handler_set_stack_ready(true);
                 esp_zb_scheduler_alarm(maintenance_alarm, 0, MAINTENANCE_PERIOD_MS);
+                di_startup_probe_known_devices();
             } else {
                 ZB_LOG("SIGNAL FORMATION FAILED err=0x%X — retrying", err);
                 esp_zb_bdb_start_top_level_commissioning(
@@ -99,6 +100,7 @@ void esp_zb_app_signal_handler(esp_zb_app_signal_t *signal_struct)
                 s_network_ready = true;
                 button_handler_set_stack_ready(true);
                 esp_zb_scheduler_alarm(maintenance_alarm, 0, MAINTENANCE_PERIOD_MS);
+                di_startup_probe_known_devices();
             } else {
                 ZB_LOG("SIGNAL DEVICE_REBOOT err=0x%X — forming new network", err);
                 esp_zb_bdb_start_top_level_commissioning(
@@ -354,16 +356,6 @@ static esp_err_t zb_action_handler(esp_zb_core_action_callback_id_t cb_id,
             break;
     }
     return ret;
-}
-
-// ---------------------------------------------------------------------------
-// Zigbee main loop task
-// ---------------------------------------------------------------------------
-
-static void zigbee_main_task(void *arg)
-{
-    (void)arg;
-    esp_zb_stack_main_loop();   // never returns
 }
 
 // ---------------------------------------------------------------------------
