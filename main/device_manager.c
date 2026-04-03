@@ -1,4 +1,5 @@
 #include "device_manager.h"
+#include "zb_events.h"
 #include "utils.h"
 #include <string.h>
 #include <stdio.h>
@@ -12,6 +13,20 @@
 static device_record_t g_devices[MAX_DEVICES];
 static uint8_t         g_count = 0;
 static SemaphoreHandle_t g_mutex = NULL;
+
+static void dm_emit_availability(const device_record_t *dev)
+{
+    if (!dev) return;
+
+    zb_event_t evt = {
+        .type   = ZB_EVT_AVAILABILITY,
+        .ieee   = dev->ieee_addr,
+        .online = dev->online,
+    };
+    strncpy(evt.friendly_name, dev->friendly_name, ZB_EVT_NAME_LEN - 1);
+    evt.friendly_name[ZB_EVT_NAME_LEN - 1] = '\0';
+    zb_events_emit(&evt);
+}
 
 // ---------------------------------------------------------------------------
 // Init
@@ -130,7 +145,19 @@ void dm_touch(device_record_t *dev, uint8_t lqi, int8_t rssi)
         dev->online = true;
         ZB_LOG("DEVICE %s ONLINE nwk=0x%04X lqi=%u rssi=%d",
                dm_display_name(dev), dev->nwk_addr, lqi, rssi);
+        dm_emit_availability(dev);
     }
+}
+
+bool dm_set_online(device_record_t *dev, bool online)
+{
+    if (!dev) return false;
+    if (dev->online == online) return false;
+
+    dev->online = online;
+    ZB_LOG("DEVICE %s %s", dm_display_name(dev), online ? "ONLINE" : "OFFLINE");
+    dm_emit_availability(dev);
+    return true;
 }
 
 void dm_set_friendly_name(device_record_t *dev, const char *name)
@@ -170,6 +197,7 @@ void dm_check_presence(void)
             d->online = false;
             uint32_t secs = (now - d->last_seen_ms) / 1000u;
             ZB_LOG("DEVICE %s OFFLINE (no contact %lu s)", dm_display_name(d), (unsigned long)secs);
+            dm_emit_availability(d);
         }
     }
 }

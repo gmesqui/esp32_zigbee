@@ -4,6 +4,7 @@
 #include "esp_event.h"
 #include "esp_netif.h"
 #include "esp_eth.h"
+#include "esp_mac.h"
 #include "esp_eth_mac_spi.h"
 #include "driver/spi_master.h"
 #include "driver/gpio.h"
@@ -64,6 +65,16 @@ static void eth_event_handler(void *arg, esp_event_base_t base,
 {
     switch (id) {
         case ETHERNET_EVENT_CONNECTED:
+            if (data) {
+                uint8_t mac_addr[6] = {0};
+                esp_eth_handle_t eth_handle = *(esp_eth_handle_t *)data;
+                if (esp_eth_ioctl(eth_handle, ETH_CMD_G_MAC_ADDR, mac_addr) == ESP_OK) {
+                    ZB_LOG("ETH: link up, MAC %02X:%02X:%02X:%02X:%02X:%02X",
+                           mac_addr[0], mac_addr[1], mac_addr[2],
+                           mac_addr[3], mac_addr[4], mac_addr[5]);
+                    break;
+                }
+            }
             ZB_LOG("ETH: link up");
             break;
         case ETHERNET_EVENT_DISCONNECTED:
@@ -86,6 +97,7 @@ static void eth_event_handler(void *arg, esp_event_base_t base,
 EventGroupHandle_t eth_driver_init(void)
 {
     s_eth_eg = xEventGroupCreate();
+    configASSERT(s_eth_eg);
 
     // 1. Default event loop (required by esp_eth and esp_netif)
     ESP_ERROR_CHECK(esp_event_loop_create_default());
@@ -107,7 +119,14 @@ EventGroupHandle_t eth_driver_init(void)
     };
     ESP_ERROR_CHECK(spi_bus_initialize(ETH_SPI_HOST, &buscfg, SPI_DMA_CH_AUTO));
 
-    // 5. W5500 SPI device config
+    // 5. SPI Ethernet MAC drivers use gpio_isr_handler_add() on their INT pin.
+    // Install the shared GPIO ISR service up front so W5500 init can hook it.
+    esp_err_t err = gpio_install_isr_service(0);
+    if (err != ESP_OK && err != ESP_ERR_INVALID_STATE) {
+        ESP_ERROR_CHECK(err);
+    }
+
+    // 6. W5500 SPI device config
     spi_device_interface_config_t spi_devcfg = {
         .command_bits     = 16,
         .address_bits     = 8,
@@ -120,7 +139,7 @@ EventGroupHandle_t eth_driver_init(void)
         .queue_size       = 20,
     };
 
-    // 6. W5500 MAC config
+    // 7. W5500 MAC config
     eth_w5500_config_t w5500_cfg = ETH_W5500_DEFAULT_CONFIG(ETH_SPI_HOST, &spi_devcfg);
     w5500_cfg.int_gpio_num = ETH_INT_GPIO;
 
@@ -133,23 +152,30 @@ EventGroupHandle_t eth_driver_init(void)
 
     esp_eth_mac_t *mac = esp_eth_mac_new_w5500(&w5500_cfg, &mac_cfg);
     esp_eth_phy_t *phy = esp_eth_phy_new_w5500(&phy_cfg);
+    assert(mac);
+    assert(phy);
 
-    // 7. Install Ethernet driver
+    // 8. Install Ethernet driver
     esp_eth_config_t eth_cfg = ETH_DEFAULT_CONFIG(mac, phy);
     esp_eth_handle_t eth_handle = NULL;
     ESP_ERROR_CHECK(esp_eth_driver_install(&eth_cfg, &eth_handle));
 
-    // 8. Attach to netif
+    // W5500 has no factory-burned MAC, so assign one derived from the chip base MAC.
+    uint8_t eth_mac[6] = {0};
+    ESP_ERROR_CHECK(esp_read_mac(eth_mac, ESP_MAC_ETH));
+    ESP_ERROR_CHECK(esp_eth_ioctl(eth_handle, ETH_CMD_S_MAC_ADDR, eth_mac));
+
+    // 9. Attach to netif
     esp_eth_netif_glue_handle_t glue = esp_eth_new_netif_glue(eth_handle);
     ESP_ERROR_CHECK(esp_netif_attach(eth_netif, glue));
 
-    // 9. Register event handlers
+    // 10. Register event handlers
     ESP_ERROR_CHECK(esp_event_handler_register(ETH_EVENT,  ESP_EVENT_ANY_ID,
                                                 &eth_event_handler, NULL));
     ESP_ERROR_CHECK(esp_event_handler_register(IP_EVENT,   ESP_EVENT_ANY_ID,
                                                 &ip_event_handler, NULL));
 
-    // 10. Start Ethernet
+    // 11. Start Ethernet
     ESP_ERROR_CHECK(esp_eth_start(eth_handle));
     ZB_LOG("ETH: W5500 driver started (waiting for DHCP)");
 

@@ -130,13 +130,8 @@ void button_handler_init(void)
         return;
     }
 
-    err = gpio_install_isr_service(0);
-    if (err != ESP_OK && err != ESP_ERR_INVALID_STATE) {
-        ZB_LOG("ERROR button_handler: gpio_install_isr_service failed: %s",
-               esp_err_to_name(err));
-        return;
-    }
-
+    // The shared GPIO ISR service is installed during system bring-up
+    // before peripherals such as the W5500 and this button register handlers.
     err = gpio_isr_handler_add(BOOT_BUTTON_GPIO, gpio_isr_handler, NULL);
     if (err != ESP_OK) {
         ZB_LOG("ERROR button_handler: gpio_isr_handler_add(GPIO %d) failed: %s",

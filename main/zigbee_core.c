@@ -132,7 +132,7 @@ void esp_zb_app_signal_handler(esp_zb_app_signal_t *signal_struct)
             device_record_t *dev = dm_get_or_create(ieee, nwk);
             if (dev) {
                 dm_update_nwk(dev, nwk);
-                dev->online = true;
+                dm_set_online(dev, true);
 
                 bool needs_interview =
                     (dev->state == DEV_STATE_NEW ||
@@ -215,7 +215,7 @@ void esp_zb_app_signal_handler(esp_zb_app_signal_t *signal_struct)
             device_record_t *dev = dm_find_by_ieee(ieee);
             if (dev) {
                 dm_update_nwk(dev, p->short_addr);
-                dev->online = true;
+                dm_set_online(dev, true);
             }
             dm_unlock();
             break;
@@ -238,9 +238,10 @@ void esp_zb_app_signal_handler(esp_zb_app_signal_t *signal_struct)
             device_record_t *dev = dm_find_by_ieee(ieee);
             char leave_name[ZB_EVT_NAME_LEN] = {0};
             if (dev && !p->rejoin) {
-                dev->online = false;
                 strncpy(leave_name, dev->friendly_name, ZB_EVT_NAME_LEN - 1);
-                ZB_LOG("DEVICE %s OFFLINE (leave)", dm_display_name(dev));
+                if (dm_set_online(dev, false)) {
+                    ZB_LOG("DEVICE %s OFFLINE (leave)", dm_display_name(dev));
+                }
             }
             dm_unlock();
 
@@ -265,8 +266,7 @@ void esp_zb_app_signal_handler(esp_zb_app_signal_t *signal_struct)
 
             dm_lock();
             device_record_t *dev = dm_find_by_nwk(p->short_addr);
-            if (dev && dev->online) {
-                dev->online = false;
+            if (dev && dm_set_online(dev, false)) {
                 ZB_LOG("DEVICE %s OFFLINE (unavailable)", dm_display_name(dev));
             }
             dm_unlock();

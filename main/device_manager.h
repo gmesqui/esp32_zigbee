@@ -121,6 +121,9 @@ void dm_update_nwk(device_record_t *dev, uint16_t new_nwk_addr);
 /** Record a radio contact (updates last_seen, lqi, rssi, online=true). */
 void dm_touch(device_record_t *dev, uint8_t lqi, int8_t rssi);
 
+/** Change online/offline state and emit availability event on transition. */
+bool dm_set_online(device_record_t *dev, bool online);
+
 /** Set friendly name. Truncated to FRIENDLY_NAME_LEN-1 chars. Marks dirty. */
 void dm_set_friendly_name(device_record_t *dev, const char *name);
 

@@ -166,7 +166,6 @@ static void on_zigbee_event(const zb_event_t *evt)
                      "\"ieee_address\":\"%s\"}}",
                      name, ibuf);
             enqueue_pub(B_EVT, payload, 0, false);
-            pub_availability(evt->ieee, evt->friendly_name, false, false);
             break;
         }
 
