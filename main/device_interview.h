@@ -1,0 +1,58 @@
+#pragma once
+#include <stdint.h>
+#include <stdbool.h>
+#include "device_manager.h"
+#include "esp_zigbee_core.h"
+
+// ---------------------------------------------------------------------------
+// Device interview state machine.
+//
+// The interview runs entirely within the Zigbee task context using
+// scheduler alarms and ZDO/ZCL callback chaining — no separate FreeRTOS
+// task is needed.
+//
+// Interview steps (in order):
+//   1. NODE_DESC   — capabilities, manufacturer_code, sleepy flag
+//   2. POWER_DESC  — power mode and source level
+//   3. ACTIVE_EP   — list of endpoint IDs
+//   4. SIMPLE_DESC — profile, device_id, cluster lists (per endpoint)
+//   5. READ_BASIC  — manufacturer, model, power_source from cluster 0x0000
+//   6. READ_POWER  — battery voltage/% from cluster 0x0001 (if present)
+//   7. CONFIG_REPORT — configure reporting for all supported clusters
+//
+// Only one interview runs at a time.  A lightweight FIFO queues device
+// indices when multiple devices join simultaneously.
+// ---------------------------------------------------------------------------
+
+/** Initialise the interview subsystem. Call once at startup. */
+void di_init(void);
+
+/** Enqueue a device for interview.  Safe to call from the Zigbee task.
+ *  If no interview is in progress, starts immediately. */
+void di_enqueue(device_record_t *dev);
+
+/** Trigger async IEEE-address resolution for an unknown short address.
+ *  Sends a ZDO IEEE Addr request; when the response arrives the device
+ *  will be matched/created and any pending ZCL attributes replayed. */
+void di_trigger_ieee_resolve(uint16_t nwk_addr);
+
+// ---------------------------------------------------------------------------
+// ZDO response callbacks — registered with the SDK and called from Zigbee
+// task context.  Signatures match the esp_zb_zdo_*_callback_t typedefs.
+// ---------------------------------------------------------------------------
+
+void di_on_ieee_addr_resp(esp_zb_zdp_status_t zdo_status,
+                           esp_zb_zdo_ieee_addr_rsp_t *resp, void *user_ctx);
+
+void di_on_node_desc_resp(esp_zb_zdp_status_t zdo_status, uint16_t addr,
+                           esp_zb_af_node_desc_t *node_desc, void *user_ctx);
+
+void di_on_power_desc_resp(esp_zb_zdo_power_desc_rsp_t *power_desc,
+                            void *user_ctx);
+
+void di_on_active_ep_resp(esp_zb_zdp_status_t zdo_status, uint8_t ep_count,
+                           uint8_t *ep_id_list, void *user_ctx);
+
+void di_on_simple_desc_resp(esp_zb_zdp_status_t zdo_status,
+                             esp_zb_af_simple_desc_1_1_t *simple_desc,
+                             void *user_ctx);

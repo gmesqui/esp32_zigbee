@@ -1,0 +1,208 @@
+#include "device_manager.h"
+#include "utils.h"
+#include <string.h>
+#include <stdio.h>
+#include "freertos/FreeRTOS.h"
+#include "freertos/semphr.h"
+
+// ---------------------------------------------------------------------------
+// Global device table — static allocation
+// ---------------------------------------------------------------------------
+
+static device_record_t g_devices[MAX_DEVICES];
+static uint8_t         g_count = 0;
+static SemaphoreHandle_t g_mutex = NULL;
+
+// ---------------------------------------------------------------------------
+// Init
+// ---------------------------------------------------------------------------
+
+void dm_init(void)
+{
+    memset(g_devices, 0, sizeof(g_devices));
+    g_count = 0;
+    g_mutex = xSemaphoreCreateMutex();
+}
+
+// ---------------------------------------------------------------------------
+// Mutex
+// ---------------------------------------------------------------------------
+
+void dm_lock(void)   { xSemaphoreTake(g_mutex, portMAX_DELAY); }
+void dm_unlock(void) { xSemaphoreGive(g_mutex); }
+
+// ---------------------------------------------------------------------------
+// Count
+// ---------------------------------------------------------------------------
+
+uint8_t dm_count(void) { return g_count; }
+
+// ---------------------------------------------------------------------------
+// Lookup
+// ---------------------------------------------------------------------------
+
+device_record_t *dm_find_by_ieee(uint64_t ieee)
+{
+    if (ieee == 0) return NULL;
+    for (int i = 0; i < MAX_DEVICES; i++) {
+        if (g_devices[i].in_use && g_devices[i].ieee_addr == ieee)
+            return &g_devices[i];
+    }
+    return NULL;
+}
+
+device_record_t *dm_find_by_nwk(uint16_t nwk_addr)
+{
+    if (nwk_addr == 0xFFFF) return NULL;
+    for (int i = 0; i < MAX_DEVICES; i++) {
+        if (g_devices[i].in_use && g_devices[i].nwk_addr == nwk_addr)
+            return &g_devices[i];
+    }
+    return NULL;
+}
+
+device_record_t *dm_get_by_index(uint8_t idx)
+{
+    if (idx >= MAX_DEVICES) return NULL;
+    if (!g_devices[idx].in_use) return NULL;
+    return &g_devices[idx];
+}
+
+// ---------------------------------------------------------------------------
+// Create / update
+// ---------------------------------------------------------------------------
+
+device_record_t *dm_get_or_create(uint64_t ieee, uint16_t nwk_addr)
+{
+    // Try to find existing entry
+    device_record_t *dev = dm_find_by_ieee(ieee);
+    if (dev) {
+        // Update nwk_addr if it changed
+        if (dev->nwk_addr != nwk_addr) {
+            dev->nwk_addr = nwk_addr;
+            dev->dirty = true;
+        }
+        return dev;
+    }
+
+    // Find a free slot
+    if (g_count >= MAX_DEVICES) {
+        ZB_LOG("ERROR dm_get_or_create: device table full");
+        return NULL;
+    }
+    for (int i = 0; i < MAX_DEVICES; i++) {
+        if (!g_devices[i].in_use) {
+            device_record_t *d = &g_devices[i];
+            memset(d, 0, sizeof(*d));
+            d->ieee_addr = ieee;
+            d->nwk_addr  = nwk_addr;
+            d->state     = DEV_STATE_NEW;
+            d->in_use    = true;
+            d->dirty     = true;
+            g_count++;
+
+            char ibuf[20];
+            utils_ieee_to_str(ieee, ibuf, sizeof(ibuf));
+            ZB_LOG("DEVICE new slot %d ieee=%s nwk=0x%04X", i, ibuf, nwk_addr);
+            return d;
+        }
+    }
+    return NULL;
+}
+
+void dm_update_nwk(device_record_t *dev, uint16_t new_nwk_addr)
+{
+    if (!dev || dev->nwk_addr == new_nwk_addr) return;
+    ZB_LOG("DEVICE %s nwk_addr 0x%04X -> 0x%04X",
+           dm_display_name(dev), dev->nwk_addr, new_nwk_addr);
+    dev->nwk_addr = new_nwk_addr;
+    dev->dirty = true;
+}
+
+void dm_touch(device_record_t *dev, uint8_t lqi, int8_t rssi)
+{
+    if (!dev) return;
+    dev->last_seen_ms = utils_uptime_ms();
+    dev->last_lqi     = lqi;
+    dev->last_rssi    = rssi;
+
+    if (!dev->online) {
+        dev->online = true;
+        ZB_LOG("DEVICE %s ONLINE nwk=0x%04X lqi=%u rssi=%d",
+               dm_display_name(dev), dev->nwk_addr, lqi, rssi);
+    }
+}
+
+void dm_set_friendly_name(device_record_t *dev, const char *name)
+{
+    if (!dev || !name) return;
+    strncpy(dev->friendly_name, name, FRIENDLY_NAME_LEN - 1);
+    dev->friendly_name[FRIENDLY_NAME_LEN - 1] = '\0';
+    dev->dirty = true;
+    ZB_LOG("DEVICE %s friendly_name set to \"%s\"",
+           dm_display_name(dev), dev->friendly_name);
+}
+
+// ---------------------------------------------------------------------------
+// Presence check
+// ---------------------------------------------------------------------------
+
+// Offline thresholds relative to max_interval.
+// We use fixed timeouts since max_interval varies by device.
+// always-on: 2 * 3600 + 60 = 7260 s
+// sleepy:    3 * 3600 + 120 = 10920 s
+#define OFFLINE_THRESHOLD_ALWAYS_ON_MS  (7260u  * 1000u)
+#define OFFLINE_THRESHOLD_SLEEPY_MS     (10920u * 1000u)
+
+void dm_check_presence(void)
+{
+    uint32_t now = utils_uptime_ms();
+    for (int i = 0; i < MAX_DEVICES; i++) {
+        device_record_t *d = &g_devices[i];
+        if (!d->in_use || !d->online) continue;
+        if (d->last_seen_ms == 0) continue;
+
+        uint32_t threshold = d->is_sleepy
+            ? OFFLINE_THRESHOLD_SLEEPY_MS
+            : OFFLINE_THRESHOLD_ALWAYS_ON_MS;
+
+        if ((now - d->last_seen_ms) > threshold) {
+            d->online = false;
+            uint32_t secs = (now - d->last_seen_ms) / 1000u;
+            ZB_LOG("DEVICE %s OFFLINE (no contact %lu s)", dm_display_name(d), (unsigned long)secs);
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Display name
+// ---------------------------------------------------------------------------
+
+const char *dm_display_name(const device_record_t *dev)
+{
+    if (!dev) return "(null)";
+    if (dev->friendly_name[0] != '\0') return dev->friendly_name;
+    static char buf[20];
+    snprintf(buf, sizeof(buf), "0x%016llX", (unsigned long long)dev->ieee_addr);
+    return buf;
+}
+
+// ---------------------------------------------------------------------------
+// Cluster helpers
+// ---------------------------------------------------------------------------
+
+bool dm_has_in_cluster(const device_record_t *dev, uint16_t cluster_id,
+                        uint8_t *ep_out)
+{
+    if (!dev) return false;
+    for (int e = 0; e < dev->endpoint_count; e++) {
+        const endpoint_record_t *ep = &dev->endpoints[e];
+        for (int c = 0; c < ep->in_cluster_count; c++) {
+            if (ep->in_clusters[c] == cluster_id) {
+                if (ep_out) *ep_out = ep->endpoint_id;
+                return true;
+            }
+        }
+    }
+    return false;
+}

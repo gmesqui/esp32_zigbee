@@ -1,0 +1,69 @@
+#include <stdio.h>
+#include "nvs_flash.h"
+#include "nvs.h"
+#include "utils.h"
+#include "device_manager.h"
+#include "nvs_cache.h"
+#include "zcl_handler.h"
+#include "device_interview.h"
+#include "led_driver.h"
+#include "button_handler.h"
+#include "serial_cmd.h"
+#include "zigbee_core.h"
+
+// ---------------------------------------------------------------------------
+// app_main — called by ESP-IDF after system init
+// ---------------------------------------------------------------------------
+
+void app_main(void)
+{
+    // 1. Initialise NVS flash (required by Zigbee stack and our own cache)
+    esp_err_t err = nvs_flash_init();
+    if (err == ESP_ERR_NVS_NO_FREE_PAGES ||
+        err == ESP_ERR_NVS_NEW_VERSION_FOUND) {
+        // NVS partition was truncated or has incompatible schema — erase and retry
+        ESP_ERROR_CHECK(nvs_flash_erase());
+        err = nvs_flash_init();
+    }
+    ESP_ERROR_CHECK(err);
+
+    ZB_LOG("=== ESP32-C5 Zigbee Coordinator booting ===");
+    ZB_LOG("Build: " __DATE__ " " __TIME__);
+
+    // 2. Device manager (must be first — others depend on it)
+    dm_init();
+
+    // 3. Load persisted device table from NVS
+    //    Devices are restored with state=INTERVIEWED, online=false.
+    //    They become online again when we receive traffic from them.
+    if (nvs_cache_load()) {
+        ZB_LOG("Device cache loaded: %u device(s)", dm_count());
+    } else {
+        ZB_LOG("No device cache — starting fresh");
+    }
+
+    // 4. ZCL handler (attribute cache, pending buffer)
+    zcl_handler_init();
+
+    // 5. Interview subsystem
+    di_init();
+
+    // 6. LED driver — starts the led_task
+    led_driver_init();
+
+    // 7. Button handler — starts the btn_task
+    button_handler_init();
+
+    // 8. Serial command handler — starts the serial_cmd_task
+    serial_cmd_init();
+
+    // 9. Zigbee core — starts the zigbee_main task
+    //    The task initialises the stack and enters the main loop.
+    //    All further operation is event-driven from there.
+    zigbee_core_init();
+
+    ZB_LOG("app_main: all subsystems started, handing off to event loop");
+
+    // app_main returns here; all work is done in FreeRTOS tasks.
+    // ESP-IDF will delete the main task automatically.
+}

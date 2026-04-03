@@ -1,0 +1,22 @@
+idf_component_register(
+    SRCS
+        "main.c"
+        "utils.c"
+        "led_driver.c"
+        "button_handler.c"
+        "device_manager.c"
+        "nvs_cache.c"
+        "zcl_handler.c"
+        "report_config.c"
+        "device_interview.c"
+        "serial_cmd.c"
+        "zigbee_core.c"
+    INCLUDE_DIRS "."
+    REQUIRES
+        nvs_flash
+        driver
+        esp_timer
+        freertos
+        log
+        led_strip
+)

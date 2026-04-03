@@ -1,0 +1,24 @@
+# ESP-IDF build output
+build/
+build_log.txt
+build_stdout.txt
+build_stderr.txt
+
+# Managed components (downloaded automatically)
+managed_components/
+
+# sdkconfig is generated but often committed; sdkconfig.old is not
+sdkconfig.old
+
+# IDE / editor
+.vscode/
+*.swp
+*.swo
+*~
+
+# OS files
+.DS_Store
+Thumbs.db
+
+# Claude Code internal files
+.claude/

@@ -1,0 +1,321 @@
+# ESP32-C5 Zigbee Coordinator
+
+Coordinador Zigbee completo para `ESP32-C5-KITC-A V1.2` con `ESP-IDF` y `ESP Zigbee SDK`.
+
+## Hardware objetivo
+
+- SoC: **ESP32-C5**, radio nativa 2.4 GHz IEEE 802.15.4
+- Flash: 4 MiB
+- LED RGB: WS2812 en GPIO 27
+- Boton BOOT: GPIO 28 (permit-join)
+- UART0: 115200 baud (monitor serie)
+
+---
+
+## Arquitectura
+
+```
+app_main()
+  ├─ nvs_flash_init()
+  ├─ dm_init()              ← tabla RAM de dispositivos
+  ├─ nvs_cache_load()       ← restaura registros desde NVS
+  ├─ zcl_handler_init()     ← cache de atributos
+  ├─ di_init()              ← maquina de estados de entrevista
+  ├─ led_driver_init()      ← tarea LED @ 50 Hz
+  ├─ button_handler_init()  ← ISR boton BOOT
+  ├─ serial_cmd_init()      ← tarea UART0
+  └─ zigbee_core_init()     ← tarea Zigbee + main loop (nunca retorna)
+```
+
+### Tareas FreeRTOS
+
+| Tarea | Prioridad | Proposito |
+|-------|-----------|-----------|
+| `zigbee_main` | 5 | Loop principal del stack Zigbee |
+| `btn_task` | 3 | Procesador de eventos de boton |
+| `led_task` | 2 | Animacion LED @ 50 Hz |
+| `serial_cmd_task` | 1 | Listener UART0 |
+
+### Ficheros fuente
+
+| Fichero | Responsabilidad |
+|---------|----------------|
+| `main.c` | Punto de entrada, secuencia de inicializacion |
+| `zigbee_core.c/h` | Init coordinador, manejador de senales BDB/ZDO, manejador de acciones ZCL, alarmas de mantenimiento |
+| `device_manager.c/h` | Tabla RAM thread-safe (max 32 dispositivos), ciclo de vida, lookups por IEEE/NWK |
+| `device_interview.c/h` | Maquina de estados de entrevista (7 pasos), cola FIFO, callbacks ZDO, resolucion IEEE |
+| `zcl_handler.c/h` | Decodificacion de Report Attributes y Read Attribute Responses, cache con deteccion de cambios |
+| `report_config.c/h` | Envio de Configure Reporting tras entrevista (13 clusters), respuesta IAS enrollment |
+| `nvs_cache.c/h` | Serializacion/deserializacion binaria de dispositivos en NVS, escrituras lazy por bandera dirty |
+| `serial_cmd.c/h` | Comandos interactivos por UART0 (teclas 1–5, n, j, r, e, ?) |
+| `led_driver.c/h` | Control WS2812: onda seno verde-azul base, overlay rojo permit-join, overlay blanco actividad |
+| `button_handler.c/h` | ISR con antirebote 200 ms, toggle permit-join 180 s |
+| `utils.c/h` | Uptime ms/s, IEEE→string, nombres de cluster/device-type, macro `ZB_LOG` con timestamp |
+
+---
+
+## Funcionalidades implementadas
+
+### Coordinador Zigbee
+
+- Perfil Home Automation (0x0104), dispositivo Home Gateway (0x0050)
+- Radio nativa, sin modo host
+- Max 20 hijos (routers + end devices)
+- Endpoint 1 con clusters Basic e Identify
+- Mascara de canales: todos los canales 2.4 GHz
+- Persistencia de red en NVS (namespace Zigbee stack): canal, PAN ID, ext PAN ID, clave de red
+
+### Tabla de dispositivos en RAM
+
+- 32 slots, protegida con mutex
+- Estado por dispositivo: `NEW` → `INTERVIEWING` → `INTERVIEWED` → `CONFIGURED` → `FAILED`
+- Campos por dispositivo:
+  - `ieee`, `nwk_addr`, `friendly_name`
+  - `online`, `is_sleepy`
+  - `manufacturer`, `model`, `power_source`
+  - `node_desc_flags`, `mac_capability_flags`, `manufacturer_code`, `power_desc_flags`
+  - Hasta 8 endpoints, cada uno con `profile_id`, `device_id`, `clusters_in[]`, `clusters_out[]`
+  - `last_seen_ms`, `lqi`, `rssi`
+  - `reporting_configured`
+  - Lecturas: `temperature_c`, `humidity_pct`, `on_off`, `occupancy`, `illuminance_raw`, `illuminance_lux`, `pressure_kpa`, `ias_zone_status`, `battery_mv`, `battery_pct`, `level`, `power_watts`
+  - Contadores: `report_attr_ok`, `report_attr_unchanged`, `read_rsp_ok`, `read_rsp_fail`, `interview_attempts`
+
+### Entrevista automatica (7 pasos)
+
+1. Node Descriptor Request (ZDO)
+2. Power Descriptor Request (ZDO)
+3. Active Endpoints Request (ZDO)
+4. Simple Descriptor Request por endpoint (ZDO)
+5. Read Basic Cluster (0x0000, attrs: fabricante, modelo, fuente de alimentacion)
+6. Read Power Config (0x0001, attrs: tension y porcentaje de bateria)
+7. Configure Reporting (13 clusters estandar)
+
+- Reintentos: 3 con backoff; marca FAILED si se agotan
+- Cola FIFO de 8 posiciones para joins simultaneos
+- Resolucion asıncrona de IEEE Address si se desconoce la direccion corta
+
+### Clusters soportados para reporte / lectura
+
+| Cluster | Nombre | Atributos relevantes |
+|---------|--------|----------------------|
+| 0x0001 | POWER_CFG | Tension bateria (0x0020), porcentaje (0x0021) |
+| 0x0006 | ON_OFF | Estado encendido (0x0000) |
+| 0x0008 | LEVEL | Nivel (0x0000, 0–254) |
+| 0x0300 | COLOR_CTRL | Hue, Saturation, Color Temperature |
+| 0x0400 | ILLUMINANCE | Iluminancia raw + conversion log a lux |
+| 0x0402 | TEMPERATURE | Temperatura int16 ÷ 100 → °C |
+| 0x0403 | PRESSURE | Presion int16 ÷ 10 → kPa |
+| 0x0405 | HUMIDITY | Humedad uint16 ÷ 100 → % |
+| 0x0406 | OCCUPANCY | Bitmap presencia |
+| 0x0500 | IAS_ZONE | Estado zona alarma + enrollment |
+| 0x0B04 | ELEC_MEAS | Potencia activa (0x050B) |
+
+### Configure Reporting enviado tras entrevista
+
+| Cluster | Atributo | Tipo | Min (s) | Max (s) | Threshold |
+|---------|----------|------|---------|---------|-----------|
+| 0x0006 | 0x0000 | bool | 0 | 3600 | — |
+| 0x0008 | 0x0000 | uint8 | 1 | 3600 | 1 |
+| 0x0300 | 0x0000, 0x0001 | uint8 | 1 | 3600 | 1 |
+| 0x0300 | 0x0007 | uint16 | 1 | 3600 | 10 |
+| 0x0402 | 0x0000 | int16 | 10 | 3600 | 10 |
+| 0x0405 | 0x0000 | uint16 | 10 | 3600 | 50 |
+| 0x0403 | 0x0000 | int16 | 10 | 3600 | 10 |
+| 0x0400 | 0x0000 | uint16 | 10 | 3600 | 500 |
+| 0x0406 | 0x0000 | bitmap8 | 0 | 3600 | — |
+| 0x0001 | 0x0021 | uint8 | 3600 | 43200 | 2 |
+| 0x0500 | 0x0002 | bitmap16 | 0 | 3600 | — |
+| 0x0B04 | 0x050B | int16 | 5 | 3600 | 10 |
+
+### Deteccion de presencia (offline)
+
+- **Siempre encendido**: timeout 7260 s (~2 h) = 2 × max_interval + margen
+- **Sleepy (bateria)**: timeout 10920 s (~3 h) = 3 × max_interval + margen
+- Verificacion cada 10 s via alarma de mantenimiento
+
+### Persistencia NVS de dispositivos
+
+- Namespace: `zb_cache`
+- Claves: `dt3_head` (version + count), `dt3_d00`–`dt3_d31` (blobs por dispositivo)
+- Version de esquema: **3** (los blobs de versiones anteriores se rechazan)
+- Escritura lazy: solo los registros con bandera `dirty` se escriben; se limpia tras commit
+- Periodicidad: cada 10 s via alarma de mantenimiento (solo si hay cambios)
+- Al arrancar: los dispositivos restaurados vuelven con estado INTERVIEWED, `online=false`
+- `last_seen` y cambios de RSSI/LQI NO disparan escritura NVS
+
+> Si ves `ESP_ERR_NVS_NOT_ENOUGH_SPACE` al guardar `dt3_d31`, no reduzcas la particion `nvs` (actualmente 128 KiB).
+
+### LED WS2812 (GPIO 27)
+
+| Estado | Patron |
+|--------|--------|
+| Normal | Onda seno verde-azul, periodo 4 s |
+| Permit-join abierto | Overlay rojo pulsante, periodo 1 s |
+| Actividad ZCL | Flash blanco 100 ms con decay |
+
+### Boton BOOT (GPIO 28)
+
+- Pulsacion corta: abre permit-join 180 s (o cierra si ya estaba abierto)
+- Antirebote hardware: 200 ms
+
+---
+
+## Comandos serie (UART0)
+
+| Tecla | Accion |
+|-------|--------|
+| `1` | Emite JSON completo con tabla de dispositivos |
+| `2` | Estadisticas de red (canal, PAN ID, ext PAN ID, IEEE coordinador, conteo online) |
+| `3` | Lista de tareas FreeRTOS (nombre, estado, prioridad, stack) |
+| `4` | Estadisticas de heap (libre actual, minimo historico) |
+| `5` | Estado de la cola de entrevista |
+| `n` | Asignar nombre amigable a un dispositivo (pide IEEE y nombre) |
+| `j` | Toggle permit-join (abre 180 s o cierra) |
+| `r` | Re-entrevistar dispositivo (pide IEEE, resetea estado a NEW) |
+| `e` | Borrar cache NVS (pide confirmacion "YES") |
+| `?` | Ayuda: imprime mapa de teclas |
+
+---
+
+## Formato de log
+
+Todos los logs usan timestamp relativo al arranque:
+
+```
+[T+%07.3f]  →  [T+012.345]
+```
+
+Por cada mensaje ZCL/ZDO se emiten hasta 3 lineas:
+
+1. `RAW` — bytes en hexadecimal y metadatos APS/NWK
+2. `DECODE` — campos interpretados (profile, cluster, seq, etc.)
+3. `IMPACT` — significado del mensaje y evento local desencadenado
+
+---
+
+## Salida JSON (tecla `1`)
+
+```json
+{
+  "ts_s": 123.456,
+  "device_count": 2,
+  "devices": [
+    {
+      "ieee": "0x00124B00AABBCCDD",
+      "friendly_name": "Sensor salon",
+      "short": "0x1234",
+      "online": true,
+      "is_sleepy": false,
+      "manufacturer": "Sonoff",
+      "model": "SNZB-02",
+      "power_source": "battery",
+      "state": "configured",
+      "last_seen_s": 120.123,
+      "lqi": 189,
+      "rssi": -56,
+      "reporting_configured": true,
+      "endpoints": [
+        {
+          "id": 1,
+          "profile": "0x0104",
+          "device_id": "TEMP_SENSOR",
+          "in_clusters": ["0x0000", "0x0001", "0x0003", "0x0402", "0x0405"],
+          "out_clusters": ["0x0019"]
+        }
+      ],
+      "readings": {
+        "temperature_c": 21.45,
+        "humidity_pct": 58.12,
+        "battery_mv": 3000,
+        "battery_pct": 85
+      },
+      "stats": {
+        "report_attr_ok": 42,
+        "report_attr_unchanged": 18,
+        "read_rsp_ok": 7,
+        "read_rsp_fail": 1,
+        "interview_attempts": 1
+      }
+    }
+  ]
+}
+```
+
+Solo se incluyen en `readings` las claves que tienen dato (no se emiten `null`).
+Si la iluminancia raw es 0 (demasiado baja), no se incluye `illuminance_lux`.
+
+Comportamiento ante informes repetidos: `last_seen_s` se actualiza siempre; `report_attr_ok` y los logs de valor solo se emiten si el dato **cambia** respecto al almacenado; `report_attr_unchanged` cuenta los que no alteraron el dato.
+
+---
+
+## Limites y constantes clave
+
+| Constante | Valor | Notas |
+|-----------|-------|-------|
+| `MAX_DEVICES` | 32 | Slots en tabla RAM |
+| `MAX_ENDPOINTS` | 8 | Por dispositivo |
+| `MAX_CLUSTERS_PER_EP` | 32 | Entrada + salida combinados |
+| `FRIENDLY_NAME_LEN` | 33 | 32 chars + NUL |
+| `MAX_ATTR_CACHE` | 128 | Entradas cache de atributos |
+| `MAX_PENDING_ATTRS` | 8 | Buffer para direcciones desconocidas |
+| `IQUEUE_SIZE` | 8 | Cola FIFO de entrevista |
+| `MAX_CHILDREN` | 20 | Routers + end devices |
+| `MAINTENANCE_PERIOD_MS` | 10 000 | NVS flush + deteccion presencia |
+| `OFFLINE_THRESHOLD_ALWAYS_ON_MS` | 7 260 000 | ~2 h |
+| `OFFLINE_THRESHOLD_SLEEPY_MS` | 10 920 000 | ~3 h |
+| `PERMIT_JOIN_SECS` | 180 | Ventana abierta por boton |
+| `DEBOUNCE_MS` | 200 | Antirebote boton |
+| `LED_STRIP_GPIO` | 27 | GPIO WS2812 |
+| `BOOT_BUTTON_GPIO` | 28 | GPIO boton BOOT |
+| `NVS_CACHE_VERSION` | 3 | Version de esquema NVS |
+
+---
+
+## Particiones
+
+```
+nvs,        data, nvs,     0x9000,   0x20000    # 128 KiB — NVS (cache + stack Zigbee)
+phy_init,   data, phy,     0x29000,  0x1000     #   4 KiB — calibracion PHY
+zb_storage, data, fat,     0x2A000,  0x10000    #  64 KiB — almacenamiento persistente Zigbee
+zb_fct,     data, fat,     0x3A000,  0x1000     #   4 KiB — factory data Zigbee
+factory,    app,  factory, 0x40000,  0x3C0000   # 3.75 MiB — firmware
+```
+
+> Si cambias los offsets de `zb_storage` / `zb_fct`, hay que flashear la tabla de particiones y puede ser necesario volver a formar la red.
+
+---
+
+## Activar entorno ESP-IDF
+
+En PowerShell:
+
+```powershell
+. "C:\Espressif\tools\Microsoft.v5.5.3.PowerShell_profile.ps1"
+```
+
+## Compilar
+
+```powershell
+idf.py set-target esp32c5
+idf.py build
+```
+
+## Flashear y monitorizar
+
+```powershell
+.\flash-monitor.ps1
+```
+
+Solo monitorizar:
+
+```powershell
+.\monitor.ps1
+```
+
+Flashear con argumentos adicionales:
+
+```powershell
+.\idf-with-com3.ps1 flash monitor
+```
+
+Salir del monitor: `Ctrl+]`

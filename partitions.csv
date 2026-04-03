@@ -1,0 +1,7 @@
+# Name,      Type, SubType, Offset,   Size
+# NVS reservada a futuro (128 KiB): cache minima fija a ocupacion maxima + margen de crecimiento.
+nvs,         data, nvs,     0x9000,   0x20000
+phy_init,    data, phy,     0x29000,  0x1000
+zb_storage,  data, fat,     0x2A000,  0x10000
+zb_fct,      data, fat,     0x3A000,  0x1000
+factory,     app,  factory, 0x40000,  0x3C0000

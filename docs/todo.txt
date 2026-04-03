@@ -1,0 +1,4 @@
+Lectura de hora desde internet, mantenimiento local, para mejores timestamp
+Implementar rename por mqtt
+Revisar tema de memoria
+Cambiar a W5500 -- HECHO (eth_layer.c independiente, mqtt_bridge.cpp simplificado)
