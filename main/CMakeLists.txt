@@ -11,6 +11,10 @@ idf_component_register(
         "device_interview.c"
         "serial_cmd.c"
         "zigbee_core.c"
+        "zb_events.c"
+        "eth_driver.c"
+        "mqtt_manager.c"
+        "mqtt_bridge.c"
     INCLUDE_DIRS "."
     REQUIRES
         nvs_flash
@@ -19,4 +23,8 @@ idf_component_register(
         freertos
         log
         led_strip
+        esp_eth
+        esp_netif
+        esp_event
+        mqtt
 )

@@ -7,6 +7,9 @@
 // ---------------------------------------------------------------------------
 #define BOOT_BUTTON_GPIO    28
 
+// Default project wiring uses GPIO28. If your board revision exposes the
+// BOOT button on GPIO9 instead, change BOOT_BUTTON_GPIO before flashing.
+
 // ---------------------------------------------------------------------------
 // Initialise the BOOT button GPIO and the permit-join timer.
 // Must be called after led_driver_init() and after the Zigbee stack is ready.

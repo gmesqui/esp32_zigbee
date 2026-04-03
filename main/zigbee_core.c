@@ -1,4 +1,5 @@
 #include "zigbee_core.h"
+#include "zb_events.h"
 #include "device_manager.h"
 #include "device_interview.h"
 #include "zcl_handler.h"
@@ -150,6 +151,16 @@ void esp_zb_app_signal_handler(esp_zb_app_signal_t *signal_struct)
                         di_enqueue(dev);
                     }
                 }
+
+                // Notify event consumers (e.g. MQTT bridge)
+                zb_event_t evt = {
+                    .type   = ZB_EVT_DEVICE_JOINED,
+                    .ieee   = ieee,
+                    .online = true,
+                };
+                strncpy(evt.friendly_name, dev->friendly_name,
+                        ZB_EVT_NAME_LEN - 1);
+                zb_events_emit(&evt);
             } else {
                 dm_unlock();
                 ZB_LOG("ERROR: device table full — cannot add %s", ibuf);
@@ -225,11 +236,23 @@ void esp_zb_app_signal_handler(esp_zb_app_signal_t *signal_struct)
 
             dm_lock();
             device_record_t *dev = dm_find_by_ieee(ieee);
+            char leave_name[ZB_EVT_NAME_LEN] = {0};
             if (dev && !p->rejoin) {
                 dev->online = false;
+                strncpy(leave_name, dev->friendly_name, ZB_EVT_NAME_LEN - 1);
                 ZB_LOG("DEVICE %s OFFLINE (leave)", dm_display_name(dev));
             }
             dm_unlock();
+
+            if (!p->rejoin) {
+                zb_event_t evt = {
+                    .type   = ZB_EVT_DEVICE_LEAVE,
+                    .ieee   = ieee,
+                    .online = false,
+                };
+                strncpy(evt.friendly_name, leave_name, ZB_EVT_NAME_LEN - 1);
+                zb_events_emit(&evt);
+            }
             break;
         }
 
@@ -257,6 +280,12 @@ void esp_zb_app_signal_handler(esp_zb_app_signal_t *signal_struct)
             ZB_LOG("SIGNAL PERMIT_JOIN %s duration=%u",
                    open ? "OPEN" : "CLOSED", *duration);
             led_set_permit_join(open);
+
+            zb_event_t evt = {
+                .type                  = ZB_EVT_PERMIT_JOIN,
+                .permit_join_duration  = *duration,
+            };
+            zb_events_emit(&evt);
             break;
         }
 

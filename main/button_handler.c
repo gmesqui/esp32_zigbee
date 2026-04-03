@@ -2,6 +2,7 @@
 #include "led_driver.h"
 #include "utils.h"
 #include "driver/gpio.h"
+#include "esp_err.h"
 #include "esp_timer.h"
 #include "freertos/FreeRTOS.h"
 #include "freertos/queue.h"
@@ -106,7 +107,13 @@ static void btn_task(void *arg)
 
 void button_handler_init(void)
 {
+    esp_err_t err;
+
     s_btn_queue = xQueueCreate(4, sizeof(uint8_t));
+    if (!s_btn_queue) {
+        ZB_LOG("ERROR button_handler: queue allocation failed");
+        return;
+    }
 
     // Configure GPIO
     gpio_config_t io_conf = {
@@ -116,9 +123,26 @@ void button_handler_init(void)
         .pull_down_en = GPIO_PULLDOWN_DISABLE,
         .intr_type    = GPIO_INTR_NEGEDGE,
     };
-    gpio_config(&io_conf);
-    gpio_install_isr_service(0);
-    gpio_isr_handler_add(BOOT_BUTTON_GPIO, gpio_isr_handler, NULL);
+    err = gpio_config(&io_conf);
+    if (err != ESP_OK) {
+        ZB_LOG("ERROR button_handler: gpio_config(GPIO %d) failed: %s",
+               BOOT_BUTTON_GPIO, esp_err_to_name(err));
+        return;
+    }
+
+    err = gpio_install_isr_service(0);
+    if (err != ESP_OK && err != ESP_ERR_INVALID_STATE) {
+        ZB_LOG("ERROR button_handler: gpio_install_isr_service failed: %s",
+               esp_err_to_name(err));
+        return;
+    }
+
+    err = gpio_isr_handler_add(BOOT_BUTTON_GPIO, gpio_isr_handler, NULL);
+    if (err != ESP_OK) {
+        ZB_LOG("ERROR button_handler: gpio_isr_handler_add(GPIO %d) failed: %s",
+               BOOT_BUTTON_GPIO, esp_err_to_name(err));
+        return;
+    }
 
     // Create expiry timer
     esp_timer_create_args_t timer_args = {
@@ -127,10 +151,18 @@ void button_handler_init(void)
         .name      = "join_timer",
         .dispatch_method = ESP_TIMER_TASK,
     };
-    esp_timer_create(&timer_args, &s_join_timer);
+    err = esp_timer_create(&timer_args, &s_join_timer);
+    if (err != ESP_OK) {
+        ZB_LOG("ERROR button_handler: esp_timer_create failed: %s",
+               esp_err_to_name(err));
+        return;
+    }
 
     // Button processing task (small stack — just queued actions)
-    xTaskCreate(btn_task, "btn_task", 2048, NULL, 3, NULL);
+    if (xTaskCreate(btn_task, "btn_task", 2048, NULL, 3, NULL) != pdPASS) {
+        ZB_LOG("ERROR button_handler: btn_task creation failed");
+        return;
+    }
 
     ZB_LOG("Button handler init OK (GPIO %d)", BOOT_BUTTON_GPIO);
 }

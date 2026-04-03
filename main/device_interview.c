@@ -1,4 +1,5 @@
 #include "device_interview.h"
+#include "zb_events.h"
 #include "report_config.h"
 #include "zcl_handler.h"
 #include "nvs_cache.h"
@@ -164,6 +165,15 @@ static void interview_fail(uint8_t dev_idx)
         ZB_LOG("INTERVIEW %s FAILED (attempt %lu)",
                dm_display_name(dev),
                (unsigned long)dev->interview_attempts);
+
+        zb_event_t evt = {
+            .type             = ZB_EVT_INTERVIEW,
+            .ieee             = dev->ieee_addr,
+            .online           = dev->online,
+            .interview_status = "failed",
+        };
+        strncpy(evt.friendly_name, dev->friendly_name, ZB_EVT_NAME_LEN - 1);
+        zb_events_emit(&evt);
     }
     g_ictx.active = false;
 
@@ -187,6 +197,24 @@ static void interview_done(uint8_t dev_idx)
                dev->manufacturer[0] ? dev->manufacturer : "?",
                dev->model[0]        ? dev->model        : "?",
                dev->is_sleepy       ? "sleepy"          : "always-on");
+
+        zb_event_t evt = {
+            .type             = ZB_EVT_INTERVIEW,
+            .ieee             = dev->ieee_addr,
+            .online           = true,
+            .interview_status = "successful",
+        };
+        strncpy(evt.friendly_name, dev->friendly_name, ZB_EVT_NAME_LEN - 1);
+        zb_events_emit(&evt);
+
+        // Also emit availability=online now that device is configured
+        zb_event_t avail_evt = {
+            .type   = ZB_EVT_AVAILABILITY,
+            .ieee   = dev->ieee_addr,
+            .online = true,
+        };
+        strncpy(avail_evt.friendly_name, dev->friendly_name, ZB_EVT_NAME_LEN - 1);
+        zb_events_emit(&avail_evt);
     }
     g_ictx.active = false;
 
@@ -305,6 +333,15 @@ static void start_interview(uint8_t dev_idx)
     ZB_LOG("INTERVIEW %s START nwk=0x%04X (attempt %lu)",
            dm_display_name(dev), dev->nwk_addr,
            (unsigned long)dev->interview_attempts);
+
+    zb_event_t evt = {
+        .type             = ZB_EVT_INTERVIEW,
+        .ieee             = dev->ieee_addr,
+        .online           = dev->online,
+        .interview_status = "started",
+    };
+    strncpy(evt.friendly_name, dev->friendly_name, ZB_EVT_NAME_LEN - 1);
+    zb_events_emit(&evt);
 
     esp_zb_scheduler_alarm(alarm_start_step, dev_idx, 200);
 }

@@ -10,6 +10,10 @@
 #include "button_handler.h"
 #include "serial_cmd.h"
 #include "zigbee_core.h"
+#include "zb_events.h"
+#include "eth_driver.h"
+#include "mqtt_manager.h"
+#include "mqtt_bridge.h"
 
 // ---------------------------------------------------------------------------
 // app_main — called by ESP-IDF after system init
@@ -30,7 +34,19 @@ void app_main(void)
     ZB_LOG("=== ESP32-C5 Zigbee Coordinator booting ===");
     ZB_LOG("Build: " __DATE__ " " __TIME__);
 
-    // 2. Device manager (must be first — others depend on it)
+    // 2. Zigbee event bus (neutral layer; must be before any emitters or consumers)
+    zb_events_init();
+
+    // 3. Ethernet driver (non-blocking; starts DHCP asynchronously)
+    EventGroupHandle_t eth_eg = eth_driver_init();
+
+    // 4. MQTT manager (starts mqtt_task; task waits for ETH_IP_READY_BIT)
+    mqtt_manager_init(eth_eg);
+
+    // 5. MQTT bridge (registers as zb_events consumer)
+    mqtt_bridge_init();
+
+    // 6. Device manager (must be before NVS load and Zigbee init)
     dm_init();
 
     // 3. Load persisted device table from NVS

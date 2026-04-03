@@ -77,3 +77,21 @@ void zcl_pending_attr_save(uint16_t nwk_addr, uint8_t ep,
 
 /** Replay any pending attrs for a now-known IEEE. */
 void zcl_pending_attr_replay(uint64_t ieee, uint16_t nwk_addr);
+
+// ---------------------------------------------------------------------------
+// State JSON export (used by MQTT bridge for reconnect burst)
+// ---------------------------------------------------------------------------
+
+/**
+ * Iterate the attribute cache for the given IEEE address and append
+ * JSON key:value pairs into buf.
+ *
+ * buf must already contain some partial JSON content (opened elsewhere).
+ * *first_field: if true the next appended field will NOT be preceded by a
+ *               comma; it is set to false after the first field is written.
+ *
+ * Thread-safe: acquires the internal attr-cache mutex.
+ * Returns number of fields appended.
+ */
+int zcl_fill_state_json(uint64_t ieee, char *buf, size_t buf_len,
+                         bool *first_field);
