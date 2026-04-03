@@ -159,6 +159,7 @@ typedef struct {
 } startup_refresh_entry_t;
 
 static const startup_refresh_entry_t k_startup_refresh_table[] = {
+    { 0x0001, 2, { 0x0020, 0x0021 } },         // Battery voltage, battery %
     { 0x0006, 1, { 0x0000 } },                 // On/Off
     { 0x0008, 1, { 0x0000 } },                 // Level
     { 0x0300, 3, { 0x0000, 0x0001, 0x0007 } }, // Color control

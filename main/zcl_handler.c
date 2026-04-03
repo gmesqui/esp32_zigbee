@@ -12,6 +12,7 @@
 #include "freertos/FreeRTOS.h"
 #include "freertos/semphr.h"
 #include "zb_osif_platform.h"
+#include "nwk/esp_zigbee_nwk.h"
 
 // ---------------------------------------------------------------------------
 // Attribute value cache
@@ -130,6 +131,174 @@ static int zcl_type_size(uint8_t type)
     }
 }
 
+static bool lookup_neighbor_metrics(uint16_t nwk_addr, uint8_t *lqi_out, int8_t *rssi_out)
+{
+    esp_zb_nwk_info_iterator_t it = ESP_ZB_NWK_INFO_ITERATOR_INIT;
+    esp_zb_nwk_neighbor_info_t nbr = {0};
+
+    while (esp_zb_nwk_get_next_neighbor(&it, &nbr) == ESP_OK) {
+        if (nbr.short_addr != nwk_addr) {
+            continue;
+        }
+
+        if (lqi_out) {
+            *lqi_out = nbr.lqi;
+        }
+        if (rssi_out) {
+            *rssi_out = nbr.rssi;
+        }
+        return true;
+    }
+
+    return false;
+}
+
+typedef struct {
+    uint16_t cluster_id;
+    uint8_t  attr_count;
+    uint16_t attrs[3];
+} sleepy_probe_entry_t;
+
+static const sleepy_probe_entry_t k_sleepy_probe_table[] = {
+    { 0x0001, 2, { 0x0020, 0x0021 } },         // Battery voltage, battery %
+    { 0x0006, 1, { 0x0000 } },                 // On/Off
+    { 0x0008, 1, { 0x0000 } },                 // Level
+    { 0x0300, 3, { 0x0000, 0x0001, 0x0007 } }, // Color control
+    { 0x0402, 1, { 0x0000 } },                 // Temperature
+    { 0x0405, 1, { 0x0000 } },                 // Humidity
+    { 0x0403, 1, { 0x0000 } },                 // Pressure
+    { 0x0400, 1, { 0x0000 } },                 // Illuminance
+    { 0x0406, 1, { 0x0000 } },                 // Occupancy
+    { 0x0500, 1, { 0x0002 } },                 // IAS Zone status
+    { 0x0B04, 1, { 0x050B } },                 // Active power
+};
+
+static void send_read_attrs(uint16_t nwk_addr, uint8_t ep_id,
+                            uint16_t cluster_id, uint8_t attr_count,
+                            uint16_t *attrs)
+{
+    if (!attrs || attr_count == 0) {
+        return;
+    }
+
+    esp_zb_zcl_read_attr_cmd_t cmd = {
+        .zcl_basic_cmd = {
+            .src_endpoint          = 1,
+            .dst_addr_u.addr_short = nwk_addr,
+            .dst_endpoint          = ep_id,
+        },
+        .address_mode = ESP_ZB_APS_ADDR_MODE_16_ENDP_PRESENT,
+        .clusterID    = cluster_id,
+        .attr_number  = attr_count,
+        .attr_field   = attrs,
+    };
+    esp_zb_zcl_read_attr_cmd_req(&cmd);
+}
+
+static bool cache_has_attr(uint64_t ieee, uint8_t ep, uint16_t cluster, uint16_t attr_id)
+{
+    xSemaphoreTake(g_attr_mutex, portMAX_DELAY);
+    bool has_attr = (cache_find(ieee, ep, cluster, attr_id) != NULL);
+    xSemaphoreGive(g_attr_mutex);
+    return has_attr;
+}
+
+static const endpoint_record_t *find_endpoint_record(const device_record_t *dev, uint8_t endpoint_id)
+{
+    if (!dev) {
+        return NULL;
+    }
+
+    for (int i = 0; i < dev->endpoint_count; i++) {
+        if (dev->endpoints[i].endpoint_id == endpoint_id) {
+            return &dev->endpoints[i];
+        }
+    }
+
+    return NULL;
+}
+
+static bool endpoint_has_in_cluster(const endpoint_record_t *ep, uint16_t cluster_id)
+{
+    if (!ep) {
+        return false;
+    }
+
+    for (int i = 0; i < ep->in_cluster_count; i++) {
+        if (ep->in_clusters[i] == cluster_id) {
+            return true;
+        }
+    }
+
+    return false;
+}
+
+static bool is_recent_probe(const device_record_t *dev)
+{
+    if (!dev || dev->last_probe_ms == 0) {
+        return false;
+    }
+    return (utils_uptime_ms() - dev->last_probe_ms) < 5000u;
+}
+
+static void maybe_probe_sleepy_device(device_record_t *dev, uint8_t ep,
+                                      uint16_t reported_cluster, uint16_t reported_attr)
+{
+    if (!dev || !dev->is_sleepy || ep == 0) {
+        return;
+    }
+
+    const endpoint_record_t *endpoint = find_endpoint_record(dev, ep);
+    if (!endpoint) {
+        return;
+    }
+
+    uint32_t now = utils_uptime_ms();
+    if ((now - dev->last_probe_ms) < 2000u) {
+        return;
+    }
+
+    bool sent_any_probe = false;
+    for (size_t i = 0; i < sizeof(k_sleepy_probe_table) / sizeof(k_sleepy_probe_table[0]); i++) {
+        const sleepy_probe_entry_t *entry = &k_sleepy_probe_table[i];
+        if (!endpoint_has_in_cluster(endpoint, entry->cluster_id)) {
+            continue;
+        }
+
+        uint16_t missing_attrs[3] = {0};
+        uint8_t missing_count = 0;
+        for (int a = 0; a < entry->attr_count; a++) {
+            uint16_t attr_id = entry->attrs[a];
+            if (!cache_has_attr(dev->ieee_addr, ep, entry->cluster_id, attr_id)) {
+                missing_attrs[missing_count++] = attr_id;
+            }
+        }
+
+        if (missing_count == 0) {
+            continue;
+        }
+
+        if (!sent_any_probe) {
+            dev->last_probe_ms = now;
+            sent_any_probe = true;
+        }
+
+        ZB_LOG("SLEEPY_PROBE %s read cluster=%s ep=%u missing=%u",
+               dm_display_name(dev), utils_cluster_name(entry->cluster_id),
+               ep, missing_count);
+        send_read_attrs(dev->nwk_addr, ep, entry->cluster_id, missing_count, missing_attrs);
+    }
+
+    if (!sent_any_probe && !dev->radio_metrics_valid) {
+        uint16_t attr = reported_attr;
+        dev->last_probe_ms = now;
+        ZB_LOG("SLEEPY_PROBE %s read cluster=%s attr=0x%04X ep=%u for metrics",
+               dm_display_name(dev), utils_cluster_name(reported_cluster),
+               reported_attr, ep);
+        send_read_attrs(dev->nwk_addr, ep, reported_cluster, 1, &attr);
+    }
+}
+
 // ---------------------------------------------------------------------------
 // Format a decoded value as a human-readable string for STATE logs
 // ---------------------------------------------------------------------------
@@ -184,14 +353,14 @@ static void format_attr_value(uint16_t cluster, uint16_t attr_id,
 
         case 0x0001:  // Power Config
             if (attr_id == 0x0020) {
-                snprintf(out, out_len, "battery_voltage=%u mV",
+                snprintf(out, out_len, "voltage=%u mV",
                          (unsigned)read_uint(val, 1) * 100u);
             } else if (attr_id == 0x0021) {
                 uint8_t raw = val[0];
                 if (raw == 0xFF) {
-                    snprintf(out, out_len, "battery_pct=unknown");
+                    snprintf(out, out_len, "battery=unknown");
                 } else {
-                    snprintf(out, out_len, "battery_pct=%u %%", raw / 2u);
+                    snprintf(out, out_len, "battery=%u %%", raw / 2u);
                 }
             } else {
                 snprintf(out, out_len, "power_cfg[0x%04X]=0x%02X", attr_id, val[0]);
@@ -238,6 +407,7 @@ static void emit_attr_changed_event(const device_record_t *dev, uint8_t ep,
         .type       = ZB_EVT_ATTR_CHANGED,
         .ieee       = dev->ieee_addr,
         .lqi        = dev->last_lqi,
+        .has_lqi    = dev->radio_metrics_valid,
         .endpoint   = ep,
         .cluster_id = cluster,
         .attr_id    = attr_id,
@@ -333,8 +503,15 @@ esp_err_t zcl_on_report_attr(const esp_zb_zcl_report_attr_message_t *msg)
         return ESP_OK;
     }
 
-    // Touch (update last_seen, set online)
-    dm_touch(dev, 0, 0);  // LQI/RSSI not available directly from ZCL report
+    // Attribute reports do not expose RSSI in this callback, so refresh
+    // metrics from the NWK neighbor table when possible (useful for sleepy EDs).
+    uint8_t lqi = 0;
+    int8_t rssi = 0;
+    if (lookup_neighbor_metrics(src_nwk, &lqi, &rssi)) {
+        dm_touch(dev, lqi, rssi);
+    } else {
+        dm_touch(dev, 0, 0);
+    }
 
     // Decode and log
     ZB_LOG("RX DECODE src=%s/%u cluster=%s attr=0x%04X",
@@ -344,6 +521,8 @@ esp_err_t zcl_on_report_attr(const esp_zb_zcl_report_attr_message_t *msg)
     process_attribute(dev, src_ep, cluster,
                       msg->attribute.id, msg->attribute.data.type,
                       msg->attribute.data.value, true);
+
+    maybe_probe_sleepy_device(dev, src_ep, cluster, msg->attribute.id);
 
     return ESP_OK;
 }
@@ -388,8 +567,22 @@ esp_err_t zcl_on_read_attr_resp(const esp_zb_zcl_cmd_read_attr_resp_message_t *m
             dev->read_rsp_fail++;
             ZB_LOG("RX READ_ATTR_RSP %s attr=0x%04X status=0x%02X (fail)",
                    dm_display_name(dev), var->attribute.id, var->status);
+            if (is_recent_probe(dev)) {
+                ZB_LOG("SLEEPY_PROBE %s attr=0x%04X failed status=0x%02X",
+                       dm_display_name(dev), var->attribute.id, var->status);
+            }
         }
         var = var->next;
+    }
+
+    if (is_recent_probe(dev)) {
+        bool has_battery = cache_has_attr(dev->ieee_addr, msg->info.src_endpoint, 0x0001, 0x0021);
+        bool has_voltage = cache_has_attr(dev->ieee_addr, msg->info.src_endpoint, 0x0001, 0x0020);
+        ZB_LOG("SLEEPY_PROBE %s response cluster=%s rssi=%d lqi=%u battery=%s voltage=%s",
+               dm_display_name(dev), utils_cluster_name(msg->info.cluster),
+               msg->info.header.rssi, dev->last_lqi,
+               has_battery ? "yes" : "no",
+               has_voltage ? "yes" : "no");
     }
 
     if (any_changed) {
@@ -429,7 +622,13 @@ esp_err_t zcl_on_ias_enroll_req(const esp_zb_zcl_ias_zone_enroll_request_message
     esp_zb_zcl_ias_zone_enroll_cmd_resp(&resp);
 
     if (dev) {
-        dm_touch(dev, 0, 0);
+        uint8_t lqi = 0;
+        int8_t rssi = 0;
+        if (lookup_neighbor_metrics(src_nwk, &lqi, &rssi)) {
+            dm_touch(dev, lqi, rssi);
+        } else {
+            dm_touch(dev, 0, 0);
+        }
         ZB_LOG("IAS ENROLL_RSP sent to %s zone_id=1", dm_display_name(dev));
     }
 
@@ -450,7 +649,13 @@ esp_err_t zcl_on_ias_zone_status(
     device_record_t *dev = dm_find_by_nwk(src_nwk);
     if (!dev) return ESP_OK;
 
-    dm_touch(dev, 0, 0);
+    uint8_t lqi = 0;
+    int8_t rssi = 0;
+    if (lookup_neighbor_metrics(src_nwk, &lqi, &rssi)) {
+        dm_touch(dev, lqi, rssi);
+    } else {
+        dm_touch(dev, 0, 0);
+    }
 
     uint16_t status = msg->zone_status;
     uint8_t  val[2] = { (uint8_t)(status & 0xFF), (uint8_t)(status >> 8) };
@@ -640,7 +845,7 @@ int zcl_fill_state_json(uint64_t ieee, char *buf, size_t buf_len,
 
             case 0x0001:   // Power Config
                 if (at == 0x0020) {
-                    n = append_field(p, rem, first_field, "battery_voltage",
+                    n = append_field(p, rem, first_field, "voltage",
                                      "%"PRIu32, (uv & 0xFF) * 100u);
                 } else if (at == 0x0021 && (uv & 0xFF) != 0xFF) {
                     n = append_field(p, rem, first_field, "battery",

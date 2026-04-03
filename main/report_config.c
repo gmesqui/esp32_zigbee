@@ -40,6 +40,7 @@ static const report_cfg_entry_t k_report_table[] = {
     { 0x0403, 0x0000, ZCL_INT16,  10,   3600, 10  },  // Pressure
     { 0x0400, 0x0000, ZCL_UINT16, 10,   3600, 500 },  // Illuminance
     { 0x0406, 0x0000, ZCL_BMP8,   0,    3600, 0   },  // Occupancy
+    { 0x0001, 0x0020, ZCL_UINT8,  3600, 43200, 1  },  // Battery voltage (100 mV steps)
     { 0x0001, 0x0021, ZCL_UINT8,  3600, 43200, 2  },  // Battery %
     { 0x0500, 0x0002, ZCL_BMP16,  0,    3600, 0   },  // IAS Zone Status
     { 0x0B04, 0x050B, ZCL_INT16,  5,    3600, 10  },  // Active Power

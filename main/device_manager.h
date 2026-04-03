@@ -71,6 +71,7 @@ typedef struct {
     uint32_t  last_seen_ms;
     int8_t    last_rssi;
     uint8_t   last_lqi;
+    bool      radio_metrics_valid;
 
     // --- Telemetry counters (NOT persisted) ---
     uint32_t  report_attr_ok;
@@ -78,6 +79,7 @@ typedef struct {
     uint32_t  read_rsp_ok;
     uint32_t  read_rsp_fail;
     uint32_t  interview_attempts;
+    uint32_t  last_probe_ms;
 
     // --- Internal flags ---
     bool      dirty;          // needs NVS write

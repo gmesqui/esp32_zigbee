@@ -1,7 +1,8 @@
 #pragma once
-#include <stdint.h>
 #include <stdbool.h>
 #include <stddef.h>
+#include <stdint.h>
+#include <stdio.h>
 
 // ---------------------------------------------------------------------------
 // Timestamp
@@ -12,6 +13,12 @@ uint32_t utils_uptime_ms(void);
 
 /** Returns seconds elapsed since boot as float. */
 float utils_uptime_s(void);
+
+/** Returns true when system wall-clock time is valid. */
+bool utils_wall_time_valid(void);
+
+/** Formats a log prefix with wall-clock time or fallback uptime. */
+void utils_format_log_prefix(char *buf, size_t len);
 
 // ---------------------------------------------------------------------------
 // IEEE address helpers
@@ -41,8 +48,19 @@ const char *utils_power_source_name(uint8_t power_source);
 const char *utils_device_state_name(int state);
 
 // ---------------------------------------------------------------------------
-// Logging macro — always uses [T+xxx.xxx] prefix on stdout
+// Logging macros
 // ---------------------------------------------------------------------------
 
-#define ZB_LOG(fmt, ...) \
-    printf("[T+%07.3f] " fmt "\n", utils_uptime_s(), ##__VA_ARGS__)
+#define ZB_LOG(fmt, ...)                                                     \
+    do {                                                                     \
+        char _zb_log_prefix[32];                                             \
+        utils_format_log_prefix(_zb_log_prefix, sizeof(_zb_log_prefix));     \
+        printf("[%s] " fmt "\n", _zb_log_prefix, ##__VA_ARGS__);             \
+    } while (0)
+
+#define ZB_PRINT(fmt, ...)                                                   \
+    do {                                                                     \
+        char _zb_log_prefix[32];                                             \
+        utils_format_log_prefix(_zb_log_prefix, sizeof(_zb_log_prefix));     \
+        printf("[%s] " fmt, _zb_log_prefix, ##__VA_ARGS__);                  \
+    } while (0)

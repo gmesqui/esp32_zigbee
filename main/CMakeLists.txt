@@ -15,6 +15,7 @@ idf_component_register(
         "eth_driver.c"
         "mqtt_manager.c"
         "mqtt_bridge.c"
+        "time_sync.c"
     INCLUDE_DIRS "."
     REQUIRES
         nvs_flash
@@ -26,5 +27,6 @@ idf_component_register(
         esp_eth
         esp_netif
         esp_event
+        lwip
         mqtt
 )

@@ -1,5 +1,7 @@
 #include "utils.h"
 #include "device_manager.h"   // for device_state_t names
+#include <sys/time.h>
+#include <time.h>
 #include <stdio.h>
 #include <string.h>
 #include <stdlib.h>
@@ -17,6 +19,44 @@ uint32_t utils_uptime_ms(void)
 float utils_uptime_s(void)
 {
     return (float)(esp_timer_get_time()) / 1000000.0f;
+}
+
+bool utils_wall_time_valid(void)
+{
+    time_t now = 0;
+    struct tm utc_tm = {0};
+
+    time(&now);
+    gmtime_r(&now, &utc_tm);
+    return utc_tm.tm_year >= (2024 - 1900);
+}
+
+void utils_format_log_prefix(char *buf, size_t len)
+{
+    if (!buf || len == 0) {
+        return;
+    }
+
+    if (!utils_wall_time_valid()) {
+        snprintf(buf, len, "T+%07.3f", utils_uptime_s());
+        return;
+    }
+
+    struct timeval tv = {0};
+    struct tm utc_tm = {0};
+
+    gettimeofday(&tv, NULL);
+    gmtime_r(&tv.tv_sec, &utc_tm);
+
+    snprintf(buf, len,
+             "%04d-%02d-%02d %02d:%02d:%02d.%03ldZ",
+             utc_tm.tm_year + 1900,
+             utc_tm.tm_mon + 1,
+             utc_tm.tm_mday,
+             utc_tm.tm_hour,
+             utc_tm.tm_min,
+             utc_tm.tm_sec,
+             tv.tv_usec / 1000L);
 }
 
 // ---------------------------------------------------------------------------

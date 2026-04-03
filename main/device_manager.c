@@ -141,6 +141,7 @@ void dm_touch(device_record_t *dev, uint8_t lqi, int8_t rssi)
     if (!(lqi == 0 && rssi == 0)) {
         dev->last_lqi  = lqi;
         dev->last_rssi = rssi;
+        dev->radio_metrics_valid = true;
     }
 
     if (!dev->online) {

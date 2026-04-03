@@ -60,17 +60,24 @@ static void enqueue_pub(const char *topic, const char *payload,
 // ---------------------------------------------------------------------------
 
 static void build_device_state_json(uint64_t ieee, uint8_t lqi,
+                                     bool has_lqi,
                                      uint32_t last_seen_ms,
                                      char *buf, size_t buf_len)
 {
     char *p   = buf;
     char *end = buf + buf_len - 2;   // leave room for "}"
 
-    p += snprintf(p, end - p,
-                  "{\"linkquality\":%u,\"last_seen\":%.3f",
-                  lqi, (double)last_seen_ms / 1000.0);
+    p += snprintf(p, end - p, "{");
+    bool first = true;
+    if (has_lqi) {
+        p += snprintf(p, end - p, "\"linkquality\":%u", lqi);
+        first = false;
+    }
+    p += snprintf(p, end - p, "%s\"last_seen\":%.3f",
+                  first ? "" : ",",
+                  (double)last_seen_ms / 1000.0);
 
-    bool first = false;   // comma already written above
+    first = false;
     zcl_fill_state_json(ieee, p, (size_t)(end - p), &first);
 
     // Advance p to end of string
@@ -94,7 +101,7 @@ static void pub_device_state_enqueue(const zb_event_t *evt)
     snprintf(topic, sizeof(topic), BASE "/%s", name);
 
     char payload[MQTT_MAX_PAYLOAD_LEN];
-    build_device_state_json(evt->ieee, evt->lqi,
+    build_device_state_json(evt->ieee, evt->lqi, evt->has_lqi,
                              (uint32_t)(utils_uptime_ms()),
                              payload, sizeof(payload));
     enqueue_pub(topic, payload, 0, true);
@@ -109,7 +116,8 @@ static void pub_device_state_direct(const device_record_t *dev)
     snprintf(topic, sizeof(topic), BASE "/%s", name);
 
     char payload[MQTT_MAX_PAYLOAD_LEN];
-    build_device_state_json(dev->ieee_addr, dev->last_lqi, dev->last_seen_ms,
+    build_device_state_json(dev->ieee_addr, dev->last_lqi, dev->radio_metrics_valid,
+                             dev->last_seen_ms,
                              payload, sizeof(payload));
     direct_pub(topic, payload, 0, 1);
 }

@@ -12,6 +12,7 @@
 #include "zigbee_core.h"
 #include "zb_events.h"
 #include "eth_driver.h"
+#include "time_sync.h"
 #include "mqtt_manager.h"
 #include "mqtt_bridge.h"
 
@@ -40,13 +41,16 @@ void app_main(void)
     // 3. Ethernet driver (non-blocking; starts DHCP asynchronously)
     EventGroupHandle_t eth_eg = eth_driver_init();
 
-    // 4. MQTT manager (starts mqtt_task; task waits for ETH_IP_READY_BIT)
+    // 4. Time sync (starts SNTP after ETH_IP_READY_BIT)
+    time_sync_init(eth_eg);
+
+    // 5. MQTT manager (starts mqtt_task; task waits for ETH_IP_READY_BIT)
     mqtt_manager_init(eth_eg);
 
-    // 5. MQTT bridge (registers as zb_events consumer)
+    // 6. MQTT bridge (registers as zb_events consumer)
     mqtt_bridge_init();
 
-    // 6. Device manager (must be before NVS load and Zigbee init)
+    // 7. Device manager (must be before NVS load and Zigbee init)
     dm_init();
 
     // 3. Load persisted device table from NVS

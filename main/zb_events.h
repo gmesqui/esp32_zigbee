@@ -33,6 +33,7 @@ typedef struct {
     // ZB_EVT_AVAILABILITY, ZB_EVT_DEVICE_JOINED
     bool     online;
     uint8_t  lqi;
+    bool     has_lqi;
 
     // ZB_EVT_ATTR_CHANGED
     uint8_t  endpoint;
