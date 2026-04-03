@@ -15,11 +15,6 @@
 #include "esp_zigbee_core.h"
 
 // ---------------------------------------------------------------------------
-// Static output buffer to avoid large stack allocation
-// ---------------------------------------------------------------------------
-static char s_json_buf[6144];
-
-// ---------------------------------------------------------------------------
 // Interactive input helpers
 // ---------------------------------------------------------------------------
 
@@ -50,15 +45,11 @@ static void cmd_device_list(void)
 {
     dm_lock();
 
-    char *p = s_json_buf;
-    char *end = s_json_buf + sizeof(s_json_buf);
+    printf("DEVICE LIST\n");
+    printf("  ts_s: %.3f\n", utils_uptime_s());
+    printf("  device_count: %u\n", dm_count());
 
-    p += snprintf(p, end - p,
-                  "{\"ts_s\":%.3f,\"device_count\":%u,\"devices\":[",
-                  utils_uptime_s(), dm_count());
-
-    bool first = true;
-    for (int i = 0; i < MAX_DEVICES && p < end - 256; i++) {
+    for (int i = 0; i < MAX_DEVICES; i++) {
         device_record_t *d = dm_get_by_index(i);
         if (!d) continue;
 
@@ -66,76 +57,59 @@ static void cmd_device_list(void)
         utils_ieee_to_str(d->ieee_addr, ieee_str, sizeof(ieee_str));
         float last_s = d->last_seen_ms ? (float)d->last_seen_ms / 1000.0f : 0.0f;
 
-        if (!first) p += snprintf(p, end - p, ",");
-        first = false;
-
-        p += snprintf(p, end - p,
-                      "{\"ieee\":\"%s\","
-                      "\"friendly_name\":\"%s\","
-                      "\"short\":\"0x%04X\","
-                      "\"online\":%s,"
-                      "\"is_sleepy\":%s,"
-                      "\"manufacturer\":\"%s\","
-                      "\"model\":\"%s\","
-                      "\"power_source\":\"%s\","
-                      "\"state\":\"%s\","
-                      "\"last_seen_s\":%.3f,"
-                      "\"lqi\":%u,"
-                      "\"rssi\":%d,"
-                      "\"reporting_configured\":%s,",
-                      ieee_str,
-                      d->friendly_name[0] ? d->friendly_name : "",
-                      d->nwk_addr,
-                      d->online ? "true" : "false",
-                      d->is_sleepy ? "true" : "false",
-                      d->manufacturer,
-                      d->model,
-                      utils_power_source_name(d->power_source),
-                      utils_device_state_name((int)d->state),
-                      last_s,
-                      d->last_lqi, d->last_rssi,
-                      d->reporting_configured ? "true" : "false");
-
-        p += snprintf(p, end - p, "\"endpoints\":[");
-        for (int e = 0; e < d->endpoint_count && p < end - 128; e++) {
+        printf("  - device[%d]\n", i);
+        printf("      ieee: %s\n", ieee_str);
+        printf("      friendly_name: %s\n",
+               d->friendly_name[0] ? d->friendly_name : "-");
+        printf("      short: 0x%04X\n", d->nwk_addr);
+        printf("      online: %s\n", d->online ? "true" : "false");
+        printf("      is_sleepy: %s\n", d->is_sleepy ? "true" : "false");
+        printf("      manufacturer: %s\n", d->manufacturer[0] ? d->manufacturer : "-");
+        printf("      model: %s\n", d->model[0] ? d->model : "-");
+        printf("      power_source: %s\n", utils_power_source_name(d->power_source));
+        printf("      state: %s\n", utils_device_state_name((int)d->state));
+        printf("      last_seen_s: %.3f\n", last_s);
+        printf("      lqi: %u\n", d->last_lqi);
+        printf("      rssi: %d\n", d->last_rssi);
+        printf("      reporting_configured: %s\n",
+               d->reporting_configured ? "true" : "false");
+        printf("      endpoints:\n");
+        for (int e = 0; e < d->endpoint_count; e++) {
             endpoint_record_t *ep = &d->endpoints[e];
-            if (e) p += snprintf(p, end - p, ",");
-            p += snprintf(p, end - p,
-                          "{\"id\":%u,\"profile\":\"0x%04X\","
-                          "\"device_id\":\"%s\","
-                          "\"in_clusters\":[",
-                          ep->endpoint_id, ep->profile_id,
-                          utils_device_type_name(ep->device_id));
-            for (int c = 0; c < ep->in_cluster_count && p < end - 32; c++) {
-                if (c) p += snprintf(p, end - p, ",");
-                p += snprintf(p, end - p, "\"0x%04X\"", ep->in_clusters[c]);
+            printf("        - endpoint[%d]\n", e);
+            printf("            id: %u\n", ep->endpoint_id);
+            printf("            profile: 0x%04X\n", ep->profile_id);
+            printf("            device_id: %s\n", utils_device_type_name(ep->device_id));
+            printf("            in_clusters:");
+            if (ep->in_cluster_count == 0) {
+                printf(" -");
+            } else {
+                for (int c = 0; c < ep->in_cluster_count; c++) {
+                    printf("%s0x%04X", c == 0 ? " " : ", ", ep->in_clusters[c]);
+                }
             }
-            p += snprintf(p, end - p, "],\"out_clusters\":[");
-            for (int c = 0; c < ep->out_cluster_count && p < end - 32; c++) {
-                if (c) p += snprintf(p, end - p, ",");
-                p += snprintf(p, end - p, "\"0x%04X\"", ep->out_clusters[c]);
+            printf("\n");
+            printf("            out_clusters:");
+            if (ep->out_cluster_count == 0) {
+                printf(" -");
+            } else {
+                for (int c = 0; c < ep->out_cluster_count; c++) {
+                    printf("%s0x%04X", c == 0 ? " " : ", ", ep->out_clusters[c]);
+                }
             }
-            p += snprintf(p, end - p, "]}");
+            printf("\n");
         }
-
-        p += snprintf(p, end - p,
-                      "],\"stats\":{"
-                      "\"report_attr_ok\":%lu,"
-                      "\"report_attr_unchanged\":%lu,"
-                      "\"read_rsp_ok\":%lu,"
-                      "\"read_rsp_fail\":%lu,"
-                      "\"interview_attempts\":%lu}}",
-                      (unsigned long)d->report_attr_ok,
-                      (unsigned long)d->report_attr_unchanged,
-                      (unsigned long)d->read_rsp_ok,
-                      (unsigned long)d->read_rsp_fail,
-                      (unsigned long)d->interview_attempts);
+        printf("      stats:\n");
+        printf("        report_attr_ok: %lu\n", (unsigned long)d->report_attr_ok);
+        printf("        report_attr_unchanged: %lu\n",
+               (unsigned long)d->report_attr_unchanged);
+        printf("        read_rsp_ok: %lu\n", (unsigned long)d->read_rsp_ok);
+        printf("        read_rsp_fail: %lu\n", (unsigned long)d->read_rsp_fail);
+        printf("        interview_attempts: %lu\n",
+               (unsigned long)d->interview_attempts);
     }
-
-    p += snprintf(p, end - p, "]}");
     dm_unlock();
-
-    printf("%s\n", s_json_buf);
+    printf("END DEVICE LIST\n");
 }
 
 static void cmd_network_stats(void)
@@ -277,7 +251,7 @@ static void cmd_help(void)
 
     printf(
         "[%s] KEY MAP:\n"
-        "  1 - JSON device list\n"
+        "  1 - Device list\n"
         "  2 - Network statistics\n"
         "  3 - FreeRTOS task list\n"
         "  4 - Heap statistics\n"

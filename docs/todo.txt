@@ -1,3 +1,4 @@
 Implementar rename por mqtt
 Implementar esp32_zigbee/bridge/health
 Mejorar esp32_zigbee/bridge/info
+Mejorar esp32_zigbee/bridge/devices

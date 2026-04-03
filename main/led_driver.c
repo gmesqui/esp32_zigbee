@@ -45,11 +45,11 @@ static void led_task(void *arg)
 
         uint32_t now_ms = (uint32_t)(esp_timer_get_time() / 1000ULL);
 
-        // ---- Base sine wave: green <-> blue, period 4 s ----
+        // ---- Base sine wave: green <-> blue, period 4 s, half brightness ----
         float phase = (float)(now_ms % 4000u) * (2.0f * (float)M_PI / 4000.0f);
         float s = sinf(phase);
-        int green = (int)(128.0f + 127.0f * s);
-        int blue  = (int)(128.0f + 127.0f * (-s));   // antiphase
+        int green = (int)(64.0f + 63.0f * s);
+        int blue  = (int)(64.0f + 63.0f * (-s));   // antiphase
         int red   = 0;
 
         // ---- Permit-join overlay: red pulse 1 s period ----
