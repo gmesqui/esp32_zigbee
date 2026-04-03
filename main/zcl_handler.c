@@ -228,9 +228,32 @@ static void format_attr_value(uint16_t cluster, uint16_t attr_id,
 // Internal: process one attribute from any source
 // ---------------------------------------------------------------------------
 
-static void process_attribute(device_record_t *dev, uint8_t ep,
+static void emit_attr_changed_event(const device_record_t *dev, uint8_t ep,
+                                     uint16_t cluster, uint16_t attr_id,
+                                     uint8_t attr_type, const uint8_t *val,
+                                     int sz)
+{
+    zb_event_t evt = {
+        .type       = ZB_EVT_ATTR_CHANGED,
+        .ieee       = dev->ieee_addr,
+        .lqi        = dev->last_lqi,
+        .endpoint   = ep,
+        .cluster_id = cluster,
+        .attr_id    = attr_id,
+        .attr_type  = attr_type,
+    };
+    strncpy(evt.friendly_name, dev->friendly_name, ZB_EVT_NAME_LEN - 1);
+    evt.friendly_name[ZB_EVT_NAME_LEN - 1] = '\0';
+    if (sz > 0 && sz <= 8) {
+        memcpy(evt.value, val, (size_t)sz);
+    }
+    zb_events_emit(&evt);
+}
+
+static bool process_attribute(device_record_t *dev, uint8_t ep,
                                uint16_t cluster, uint16_t attr_id,
-                               uint8_t attr_type, const void *raw_val)
+                               uint8_t attr_type, const void *raw_val,
+                               bool emit_event)
 {
     int sz = zcl_type_size(attr_type);
     const uint8_t *val = (const uint8_t *)raw_val;
@@ -247,20 +270,9 @@ static void process_attribute(device_record_t *dev, uint8_t ep,
         ZB_LOG("STATE %s/%u %s", dm_display_name(dev), ep, desc);
 
         // Emit event for consumers (e.g. MQTT bridge) — non-blocking
-        zb_event_t evt = {
-            .type       = ZB_EVT_ATTR_CHANGED,
-            .ieee       = dev->ieee_addr,
-            .lqi        = dev->last_lqi,
-            .endpoint   = ep,
-            .cluster_id = cluster,
-            .attr_id    = attr_id,
-            .attr_type  = attr_type,
-        };
-        strncpy(evt.friendly_name, dev->friendly_name, ZB_EVT_NAME_LEN - 1);
-        if (sz > 0 && sz <= 8) {
-            memcpy(evt.value, val, (size_t)sz);
+        if (emit_event) {
+            emit_attr_changed_event(dev, ep, cluster, attr_id, attr_type, val, sz);
         }
-        zb_events_emit(&evt);
     } else {
         dev->report_attr_unchanged++;
     }
@@ -285,6 +297,8 @@ static void process_attribute(device_record_t *dev, uint8_t ep,
             dev->dirty = true;
         }
     }
+
+    return changed;
 }
 
 // ---------------------------------------------------------------------------
@@ -328,7 +342,7 @@ esp_err_t zcl_on_report_attr(const esp_zb_zcl_report_attr_message_t *msg)
 
     process_attribute(dev, src_ep, cluster,
                       msg->attribute.id, msg->attribute.data.type,
-                      msg->attribute.data.value);
+                      msg->attribute.data.value, true);
 
     return ESP_OK;
 }
@@ -349,11 +363,25 @@ esp_err_t zcl_on_read_attr_resp(const esp_zb_zcl_cmd_read_attr_resp_message_t *m
     dm_touch(dev, 0, 0);
 
     const esp_zb_zcl_read_attr_resp_variable_t *var = msg->variables;
+    bool any_changed = false;
+    uint16_t last_attr_id = 0;
+    uint8_t last_attr_type = 0;
+    uint8_t last_value[8] = {0};
+    int last_size = 0;
     while (var) {
         if (var->status == ESP_ZB_ZCL_STATUS_SUCCESS) {
-            process_attribute(dev, msg->info.src_endpoint, msg->info.cluster,
-                              var->attribute.id, var->attribute.data.type,
-                              var->attribute.data.value);
+            int sz = zcl_type_size(var->attribute.data.type);
+            if (process_attribute(dev, msg->info.src_endpoint, msg->info.cluster,
+                                  var->attribute.id, var->attribute.data.type,
+                                  var->attribute.data.value, false)) {
+                any_changed = true;
+                last_attr_id = var->attribute.id;
+                last_attr_type = var->attribute.data.type;
+                last_size = sz > 8 ? 8 : sz;
+                if (last_size > 0) {
+                    memcpy(last_value, var->attribute.data.value, (size_t)last_size);
+                }
+            }
             dev->read_rsp_ok++;
         } else {
             dev->read_rsp_fail++;
@@ -361,6 +389,11 @@ esp_err_t zcl_on_read_attr_resp(const esp_zb_zcl_cmd_read_attr_resp_message_t *m
                    dm_display_name(dev), var->attribute.id, var->status);
         }
         var = var->next;
+    }
+
+    if (any_changed) {
+        emit_attr_changed_event(dev, msg->info.src_endpoint, msg->info.cluster,
+                                last_attr_id, last_attr_type, last_value, last_size);
     }
 
     return ESP_OK;
@@ -421,7 +454,7 @@ esp_err_t zcl_on_ias_zone_status(
     uint16_t status = msg->zone_status;
     uint8_t  val[2] = { (uint8_t)(status & 0xFF), (uint8_t)(status >> 8) };
     process_attribute(dev, msg->info.src_endpoint, 0x0500,
-                      0x0002, 0x19 /*bitmap16*/, val);
+                      0x0002, 0x19 /*bitmap16*/, val, true);
 
     return ESP_OK;
 }
@@ -488,7 +521,7 @@ void zcl_pending_attr_replay(uint64_t ieee, uint16_t nwk_addr)
                dm_display_name(dev));
 
         process_attribute(dev, p->endpoint, p->cluster_id,
-                          p->attr_id, p->attr_type, p->value);
+                          p->attr_id, p->attr_type, p->value, true);
         p->in_use = false;
     }
 }
