@@ -19,8 +19,16 @@ void mqtt_bridge_init(void);
 
 /**
  * Called by mqtt_manager when an MQTT connection is established.
- * Publishes: bridge/state=online, bridge/info, bridge/devices,
+ * Publishes: bridge/state=online, bridge/info,
  *            full state + availability for every known device.
+ * Schedules bridge/devices for deferred publication once the MQTT outbox
+ * drains and DMA-capable heap is available.
  * Uses esp_mqtt_client_publish() directly (synchronous burst, no queue).
  */
 void mqtt_bridge_on_connected(void);
+
+/**
+ * Called periodically from mqtt_task while connected.
+ * Publishes deferred bridge/devices when transport conditions allow it.
+ */
+void mqtt_bridge_poll(void);

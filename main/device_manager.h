@@ -8,7 +8,19 @@
 #define MAX_DEVICES          32
 #define MAX_ENDPOINTS         8
 #define MAX_CLUSTERS_PER_EP  32
+#define MAX_BINDINGS_PER_EP   8
 #define FRIENDLY_NAME_LEN    33   // 32 printable chars + NUL
+
+// ---------------------------------------------------------------------------
+// Binding record
+// ---------------------------------------------------------------------------
+typedef struct {
+    uint16_t cluster_id;
+    uint8_t  dst_addr_mode;
+    uint16_t dst_group_addr;
+    uint64_t dst_ieee_addr;
+    uint8_t  dst_endpoint;
+} binding_record_t;
 
 // ---------------------------------------------------------------------------
 // Endpoint record
@@ -22,6 +34,8 @@ typedef struct {
     uint16_t in_clusters[MAX_CLUSTERS_PER_EP];
     uint8_t  out_cluster_count;
     uint16_t out_clusters[MAX_CLUSTERS_PER_EP];
+    uint8_t  binding_count;
+    binding_record_t bindings[MAX_BINDINGS_PER_EP];
 } endpoint_record_t;
 
 // ---------------------------------------------------------------------------
@@ -80,6 +94,7 @@ typedef struct {
     uint32_t  read_rsp_fail;
     uint32_t  interview_attempts;
     uint32_t  last_probe_ms;
+    bool      binding_refresh_active;
 
     // --- Internal flags ---
     bool      dirty;          // needs NVS write
@@ -157,3 +172,10 @@ void dm_unlock(void);
  *  that has it. */
 bool dm_has_in_cluster(const device_record_t *dev, uint16_t cluster_id,
                         uint8_t *ep_out);
+
+/** Clear all stored bindings for a device. */
+void dm_clear_bindings(device_record_t *dev);
+
+/** Append one binding to the matching source endpoint. Returns true on success. */
+bool dm_add_binding(device_record_t *dev, uint8_t src_endpoint,
+                    const binding_record_t *binding);

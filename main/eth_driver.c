@@ -9,6 +9,7 @@
 #include "driver/spi_master.h"
 #include "driver/gpio.h"
 #include "mdns.h"
+#include "esp_heap_caps.h"
 
 // ---------------------------------------------------------------------------
 // GPIO / SPI pin mapping
@@ -50,8 +51,10 @@ static void ip_event_handler(void *arg, esp_event_base_t base,
 {
     if (base == IP_EVENT && id == IP_EVENT_ETH_GOT_IP) {
         ip_event_got_ip_t *e = (ip_event_got_ip_t *)data;
+        size_t free_internal = heap_caps_get_free_size(MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT);
         ZB_LOG("ETH: IP " IPSTR " / GW " IPSTR,
                IP2STR(&e->ip_info.ip), IP2STR(&e->ip_info.gw));
+        ZB_LOG("ETH: free internal heap=%u bytes", (unsigned)free_internal);
         mdns_init_once();
         xEventGroupSetBits(s_eth_eg, ETH_IP_READY_BIT);
     } else if (base == IP_EVENT && id == IP_EVENT_ETH_LOST_IP) {

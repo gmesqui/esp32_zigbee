@@ -85,6 +85,7 @@ bool utils_str_to_ieee(const char *str, uint64_t *out_ieee)
 // ---------------------------------------------------------------------------
 
 typedef struct { uint16_t id; const char *name; } cluster_name_t;
+typedef struct { uint16_t cluster_id; uint16_t attr_id; const char *name; } attr_name_t;
 
 static const cluster_name_t k_cluster_names[] = {
     { 0x0000, "BASIC"        },
@@ -112,6 +113,48 @@ static const cluster_name_t k_cluster_names[] = {
     { 0xEF00, "TUYA_PRIV"  },
 };
 
+static const cluster_name_t k_z2m_cluster_names[] = {
+    { 0x0000, "genBasic"                  },
+    { 0x0001, "genPowerCfg"               },
+    { 0x0003, "genIdentify"               },
+    { 0x0004, "genGroups"                 },
+    { 0x0005, "genScenes"                 },
+    { 0x0006, "genOnOff"                  },
+    { 0x0008, "genLevelCtrl"              },
+    { 0x0019, "genOta"                    },
+    { 0x0020, "genPollCtrl"               },
+    { 0x0300, "lightingColorCtrl"         },
+    { 0x0400, "msIlluminanceMeasurement"  },
+    { 0x0402, "msTemperatureMeasurement"  },
+    { 0x0403, "msPressureMeasurement"     },
+    { 0x0405, "msRelativeHumidity"        },
+    { 0x0406, "msOccupancySensing"        },
+    { 0x0500, "ssIasZone"                 },
+    { 0x0501, "ssIasAce"                  },
+    { 0x0502, "ssIasWd"                   },
+    { 0x0B04, "haElectricalMeasurement"   },
+    { 0x0B05, "haDiagnostic"              },
+    { 0x1000, "touchlink"                 },
+    { 0xFC57, "manuSpecificAmazonWWAH"    },
+};
+
+static const attr_name_t k_z2m_attr_names[] = {
+    { 0x0001, 0x0020, "batteryVoltage"              },
+    { 0x0001, 0x0021, "batteryPercentageRemaining"  },
+    { 0x0006, 0x0000, "onOff"                       },
+    { 0x0008, 0x0000, "currentLevel"                },
+    { 0x0300, 0x0000, "currentHue"                  },
+    { 0x0300, 0x0001, "currentSaturation"           },
+    { 0x0300, 0x0007, "colorTemperature"            },
+    { 0x0400, 0x0000, "measuredValue"               },
+    { 0x0402, 0x0000, "measuredValue"               },
+    { 0x0403, 0x0000, "measuredValue"               },
+    { 0x0405, 0x0000, "measuredValue"               },
+    { 0x0406, 0x0000, "occupancy"                   },
+    { 0x0500, 0x0002, "zoneStatus"                  },
+    { 0x0B04, 0x050B, "activePower"                 },
+};
+
 const char *utils_cluster_name(uint16_t cluster_id)
 {
     static char buf[12];
@@ -119,6 +162,29 @@ const char *utils_cluster_name(uint16_t cluster_id)
         if (k_cluster_names[i].id == cluster_id) return k_cluster_names[i].name;
     }
     snprintf(buf, sizeof(buf), "0x%04X", cluster_id);
+    return buf;
+}
+
+const char *utils_z2m_cluster_name(uint16_t cluster_id)
+{
+    static char buf[12];
+    for (size_t i = 0; i < sizeof(k_z2m_cluster_names)/sizeof(k_z2m_cluster_names[0]); i++) {
+        if (k_z2m_cluster_names[i].id == cluster_id) return k_z2m_cluster_names[i].name;
+    }
+    snprintf(buf, sizeof(buf), "0x%04X", cluster_id);
+    return buf;
+}
+
+const char *utils_z2m_attribute_name(uint16_t cluster_id, uint16_t attr_id)
+{
+    static char buf[12];
+    for (size_t i = 0; i < sizeof(k_z2m_attr_names)/sizeof(k_z2m_attr_names[0]); i++) {
+        if (k_z2m_attr_names[i].cluster_id == cluster_id &&
+            k_z2m_attr_names[i].attr_id == attr_id) {
+            return k_z2m_attr_names[i].name;
+        }
+    }
+    snprintf(buf, sizeof(buf), "0x%04X", attr_id);
     return buf;
 }
 
@@ -164,6 +230,20 @@ const char *utils_power_source_name(uint8_t ps)
         case 0x05: return "emergency_mains_batt";
         case 0x06: return "emergency_mains";
         default:   return "other";
+    }
+}
+
+const char *utils_z2m_power_source_name(uint8_t ps)
+{
+    switch (ps) {
+        case 0x00: return "Unknown";
+        case 0x01: return "Mains (single phase)";
+        case 0x02: return "Mains (3 phase)";
+        case 0x03: return "Battery";
+        case 0x04: return "DC Source";
+        case 0x05: return "Emergency mains constantly powered";
+        case 0x06: return "Emergency mains and transfer switch";
+        default:   return "Unknown";
     }
 }
 

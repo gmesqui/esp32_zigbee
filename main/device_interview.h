@@ -60,3 +60,6 @@ void di_on_active_ep_resp(esp_zb_zdp_status_t zdo_status, uint8_t ep_count,
 void di_on_simple_desc_resp(esp_zb_zdp_status_t zdo_status,
                              esp_zb_af_simple_desc_1_1_t *simple_desc,
                              void *user_ctx);
+
+void di_on_binding_table_resp(const esp_zb_zdo_binding_table_info_t *table_info,
+                              void *user_ctx);

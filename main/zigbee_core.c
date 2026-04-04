@@ -27,6 +27,7 @@
 
 // Maximum children (routers + end devices) the coordinator manages
 #define MAX_CHILDREN            20
+#define OVERALL_NETWORK_SIZE    (MAX_DEVICES + 1)
 
 // Maintenance period: NVS flush + presence check (ms)
 #define MAINTENANCE_PERIOD_MS   10000u
@@ -385,6 +386,7 @@ static void esp_zb_task(void *arg)
             .max_children = MAX_CHILDREN,
         },
     };
+    ESP_ERROR_CHECK(esp_zb_overall_network_size_set(OVERALL_NETWORK_SIZE));
     esp_zb_init(&zb_nwk_cfg);
 
     // 3. Create coordinator endpoint

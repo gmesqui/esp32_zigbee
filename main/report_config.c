@@ -47,6 +47,45 @@ static const report_cfg_entry_t k_report_table[] = {
 };
 #define REPORT_TABLE_COUNT  (sizeof(k_report_table) / sizeof(k_report_table[0]))
 
+static bool endpoint_has_input_cluster(const endpoint_record_t *ep, uint16_t cluster_id)
+{
+    if (!ep) return false;
+
+    for (int i = 0; i < ep->in_cluster_count; i++) {
+        if (ep->in_clusters[i] == cluster_id) {
+            return true;
+        }
+    }
+    return false;
+}
+
+size_t rc_get_configured_reportings_for_endpoint(const endpoint_record_t *ep,
+                                                 rc_configured_reporting_t *out,
+                                                 size_t out_len)
+{
+    size_t count = 0;
+
+    if (!ep) return 0;
+
+    for (size_t i = 0; i < REPORT_TABLE_COUNT; i++) {
+        const report_cfg_entry_t *cfg = &k_report_table[i];
+        if (!endpoint_has_input_cluster(ep, cfg->cluster_id)) {
+            continue;
+        }
+
+        if (out && count < out_len) {
+            out[count].cluster_id = cfg->cluster_id;
+            out[count].attr_id = cfg->attr_id;
+            out[count].minimum_report_interval = cfg->min_interval;
+            out[count].maximum_report_interval = cfg->max_interval;
+            out[count].reportable_change = cfg->reportable_change;
+        }
+        count++;
+    }
+
+    return count;
+}
+
 // ---------------------------------------------------------------------------
 // Send a Configure Reporting command for one cluster/attr on one endpoint.
 //

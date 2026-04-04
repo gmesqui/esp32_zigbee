@@ -13,8 +13,8 @@
 // ---------------------------------------------------------------------------
 
 #define MQTT_MAX_TOPIC_LEN    128
-#define MQTT_MAX_PAYLOAD_LEN  1024
-#define MQTT_QUEUE_LEN        64
+#define MQTT_MAX_PAYLOAD_LEN  768
+#define MQTT_QUEUE_LEN        16
 
 typedef struct {
     char    topic[MQTT_MAX_TOPIC_LEN];

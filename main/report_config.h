@@ -1,4 +1,5 @@
 #pragma once
+#include <stddef.h>
 #include <stdint.h>
 #include <stdbool.h>
 #include "device_manager.h"
@@ -20,6 +21,20 @@
 /** Start configure-reporting for all relevant clusters on a device.
  *  Called by device_interview when STEP_CONFIGURE_REPORTING is reached. */
 void rc_configure_device(device_record_t *dev);
+
+typedef struct {
+    uint16_t cluster_id;
+    uint16_t attr_id;
+    uint16_t minimum_report_interval;
+    uint16_t maximum_report_interval;
+    uint32_t reportable_change;
+} rc_configured_reporting_t;
+
+/** Return configured reportings that apply to the given endpoint.
+ *  If out == NULL, returns the count only. */
+size_t rc_get_configured_reportings_for_endpoint(const endpoint_record_t *ep,
+                                                 rc_configured_reporting_t *out,
+                                                 size_t out_len);
 
 /** Called by zigbee_core when a Configure Reporting Response arrives.
  *  Updates dev->reporting_configured if all records succeeded. */

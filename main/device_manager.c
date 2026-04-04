@@ -238,3 +238,36 @@ bool dm_has_in_cluster(const device_record_t *dev, uint16_t cluster_id,
     }
     return false;
 }
+
+void dm_clear_bindings(device_record_t *dev)
+{
+    if (!dev) return;
+
+    for (int e = 0; e < dev->endpoint_count && e < MAX_ENDPOINTS; e++) {
+        dev->endpoints[e].binding_count = 0;
+        memset(dev->endpoints[e].bindings, 0, sizeof(dev->endpoints[e].bindings));
+    }
+    dev->dirty = true;
+}
+
+bool dm_add_binding(device_record_t *dev, uint8_t src_endpoint,
+                    const binding_record_t *binding)
+{
+    if (!dev || !binding) return false;
+
+    for (int e = 0; e < dev->endpoint_count && e < MAX_ENDPOINTS; e++) {
+        endpoint_record_t *ep = &dev->endpoints[e];
+        if (ep->endpoint_id != src_endpoint) {
+            continue;
+        }
+        if (ep->binding_count >= MAX_BINDINGS_PER_EP) {
+            return false;
+        }
+
+        ep->bindings[ep->binding_count++] = *binding;
+        dev->dirty = true;
+        return true;
+    }
+
+    return false;
+}

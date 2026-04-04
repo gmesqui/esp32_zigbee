@@ -21,6 +21,7 @@
 
 #define BACKOFF_MAX_S       30
 #define MQTT_TASK_STACK     8192
+#define MQTT_CLIENT_STACK   4096
 #define MQTT_TASK_PRIORITY  4
 
 // Task notification bits
@@ -113,6 +114,8 @@ static void mqtt_task(void *arg)
         .session.last_will.retain  = 1,
         // Disable internal auto-reconnect; we manage reconnect manually
         .network.reconnect_timeout_ms = 0,
+        .task.priority = MQTT_TASK_PRIORITY,
+        .task.stack_size = MQTT_CLIENT_STACK,
     };
 
     s_client = esp_mqtt_client_init(&cfg);
@@ -154,6 +157,7 @@ static void mqtt_task(void *arg)
             // Timeout — keep draining if connected
             if (s_connected) {
                 drain_queue();
+                mqtt_bridge_poll();
             }
         }
     }
@@ -177,6 +181,14 @@ bool mqtt_manager_publish(const char *topic, const char *payload,
                            uint8_t qos, bool retain)
 {
     if (!topic || !payload) return false;
+    if (strlen(topic) >= MQTT_MAX_TOPIC_LEN) {
+        ZB_LOG("MQTT: topic too long, drop publish");
+        return false;
+    }
+    if (strlen(payload) >= MQTT_MAX_PAYLOAD_LEN) {
+        ZB_LOG("MQTT: payload too long for queue, drop topic=%s", topic);
+        return false;
+    }
 
     mqtt_msg_t msg;
     strncpy(msg.topic,   topic,   sizeof(msg.topic)   - 1);

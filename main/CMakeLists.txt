@@ -8,6 +8,7 @@ idf_component_register(
         "nvs_cache.c"
         "zcl_handler.c"
         "report_config.c"
+        "device_definition.c"
         "device_interview.c"
         "serial_cmd.c"
         "zigbee_core.c"

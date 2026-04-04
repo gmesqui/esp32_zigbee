@@ -311,7 +311,11 @@ static void format_attr_value(uint16_t cluster, uint16_t attr_id,
 
     switch (cluster) {
         case 0x0006:  // On/Off
-            snprintf(out, out_len, "on_off=%s", val[0] ? "ON" : "OFF");
+            if (attr_id == 0x0000) {
+                snprintf(out, out_len, "on_off=%s", val[0] ? "ON" : "OFF");
+            } else {
+                snprintf(out, out_len, "on_off[0x%04X]=0x%02X", attr_id, val[0]);
+            }
             return;
 
         case 0x0008:  // Level Control
@@ -792,8 +796,14 @@ int zcl_fill_state_json(uint64_t ieee, char *buf, size_t buf_len,
 
         switch (cl) {
             case 0x0006:   // On/Off
-                n = append_field(p, rem, first_field,
-                                 "state", "\"%s\"", uv ? "ON" : "OFF");
+                // Export only the standard OnOff attribute as `state`.
+                // Some devices also report manufacturer-specific attrs in the
+                // same cluster (e.g. 0x4001/0x8001/0x8002), which would
+                // otherwise duplicate the JSON key.
+                if (at == 0x0000) {
+                    n = append_field(p, rem, first_field,
+                                     "state", "\"%s\"", uv ? "ON" : "OFF");
+                }
                 break;
 
             case 0x0008:   // Level Control

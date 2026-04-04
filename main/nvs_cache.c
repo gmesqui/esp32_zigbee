@@ -38,14 +38,24 @@ typedef struct {
     uint8_t  device_version;
     uint8_t  in_cluster_count;
     uint8_t  out_cluster_count;
+    uint8_t  binding_count;
 } nvs_ep_hdr_t;
+
+typedef struct {
+    uint16_t cluster_id;
+    uint8_t  dst_addr_mode;
+    uint16_t dst_group_addr;
+    uint64_t dst_ieee_addr;
+    uint8_t  dst_endpoint;
+} nvs_binding_t;
 
 #pragma pack(pop)
 
 // Maximum blob size per device
 #define MAX_BLOB_SIZE  (sizeof(nvs_dev_hdr_t) + \
                         MAX_ENDPOINTS * (sizeof(nvs_ep_hdr_t) + \
-                        MAX_CLUSTERS_PER_EP * 2 * sizeof(uint16_t)))
+                        MAX_CLUSTERS_PER_EP * 2 * sizeof(uint16_t) + \
+                        MAX_BINDINGS_PER_EP * sizeof(nvs_binding_t)))
 
 static uint8_t s_blob[MAX_BLOB_SIZE];   // shared serialisation buffer
 
@@ -90,6 +100,8 @@ static size_t serialise(uint8_t idx)
                                  ? ep->in_cluster_count : MAX_CLUSTERS_PER_EP,
             .out_cluster_count= (ep->out_cluster_count < MAX_CLUSTERS_PER_EP)
                                  ? ep->out_cluster_count : MAX_CLUSTERS_PER_EP,
+            .binding_count    = (ep->binding_count < MAX_BINDINGS_PER_EP)
+                                 ? ep->binding_count : MAX_BINDINGS_PER_EP,
         };
         memcpy(p, &ehdr, sizeof(ehdr));
         p += sizeof(ehdr);
@@ -98,6 +110,18 @@ static size_t serialise(uint8_t idx)
         size_t out_bytes = ehdr.out_cluster_count * sizeof(uint16_t);
         memcpy(p, ep->in_clusters,  in_bytes);  p += in_bytes;
         memcpy(p, ep->out_clusters, out_bytes); p += out_bytes;
+
+        for (int b = 0; b < ehdr.binding_count; b++) {
+            nvs_binding_t bhdr = {
+                .cluster_id = ep->bindings[b].cluster_id,
+                .dst_addr_mode = ep->bindings[b].dst_addr_mode,
+                .dst_group_addr = ep->bindings[b].dst_group_addr,
+                .dst_ieee_addr = ep->bindings[b].dst_ieee_addr,
+                .dst_endpoint = ep->bindings[b].dst_endpoint,
+            };
+            memcpy(p, &bhdr, sizeof(bhdr));
+            p += sizeof(bhdr);
+        }
     }
 
     return (size_t)(p - s_blob);
@@ -166,6 +190,8 @@ static bool deserialise(const uint8_t *blob, size_t len)
                                 ? ehdr->in_cluster_count : MAX_CLUSTERS_PER_EP;
         ep->out_cluster_count= (ehdr->out_cluster_count < MAX_CLUSTERS_PER_EP)
                                 ? ehdr->out_cluster_count : MAX_CLUSTERS_PER_EP;
+        ep->binding_count    = (ehdr->binding_count < MAX_BINDINGS_PER_EP)
+                                ? ehdr->binding_count : MAX_BINDINGS_PER_EP;
 
         size_t in_bytes  = ep->in_cluster_count  * sizeof(uint16_t);
         size_t out_bytes = ep->out_cluster_count * sizeof(uint16_t);
@@ -173,6 +199,22 @@ static bool deserialise(const uint8_t *blob, size_t len)
         if ((size_t)(p - blob) + in_bytes + out_bytes > len) break;
         memcpy(ep->in_clusters,  p, in_bytes);  p += in_bytes;
         memcpy(ep->out_clusters, p, out_bytes); p += out_bytes;
+
+        size_t binding_bytes = ep->binding_count * sizeof(nvs_binding_t);
+        if ((size_t)(p - blob) + binding_bytes > len) {
+            ep->binding_count = 0;
+            break;
+        }
+
+        for (int b = 0; b < ep->binding_count; b++) {
+            const nvs_binding_t *bhdr = (const nvs_binding_t *)p;
+            ep->bindings[b].cluster_id = bhdr->cluster_id;
+            ep->bindings[b].dst_addr_mode = bhdr->dst_addr_mode;
+            ep->bindings[b].dst_group_addr = bhdr->dst_group_addr;
+            ep->bindings[b].dst_ieee_addr = bhdr->dst_ieee_addr;
+            ep->bindings[b].dst_endpoint = bhdr->dst_endpoint;
+            p += sizeof(nvs_binding_t);
+        }
     }
 
     return true;

@@ -82,6 +82,10 @@ static int dev_to_idx(const device_record_t *dev)
 
 static void interview_step(uint8_t dev_idx);    // dispatcher
 static void alarm_start_step(uint8_t dev_idx);  // fired by scheduler
+static void request_binding_table(device_record_t *dev, uint8_t start_index);
+
+#define BINDING_DST_ADDR_MODE_GROUP   0x01u
+#define BINDING_DST_ADDR_MODE_IEEE    0x03u
 
 // ---------------------------------------------------------------------------
 // Helpers: send ZDO requests for each step
@@ -116,6 +120,17 @@ static void send_simple_desc(uint16_t nwk_addr, uint8_t ep_id, uint8_t dev_idx)
     };
     esp_zb_zdo_simple_desc_req(&p, di_on_simple_desc_resp,
                                 (void *)(uintptr_t)dev_idx);
+}
+
+static void send_binding_table_req(uint16_t nwk_addr, uint8_t start_index,
+                                   uint8_t dev_idx)
+{
+    esp_zb_zdo_mgmt_bind_param_t p = {
+        .start_index = start_index,
+        .dst_addr = nwk_addr,
+    };
+    esp_zb_zdo_binding_table_req(&p, di_on_binding_table_resp,
+                                 (void *)(uintptr_t)dev_idx);
 }
 
 static void send_read_basic(uint16_t nwk_addr, uint8_t ep_id)
@@ -277,6 +292,7 @@ static void startup_probe_step(uint8_t dev_idx)
     ZB_LOG("STARTUP_PROBE %s begin (%s)",
            dm_display_name(dev), dev->online ? "already-online" : "offline");
     probe_device_state(dev);
+    request_binding_table(dev, 0);
     startup_probe_schedule_next(dev_idx);
 }
 
@@ -343,6 +359,8 @@ static void interview_done(uint8_t dev_idx)
         };
         strncpy(avail_evt.friendly_name, dev->friendly_name, ZB_EVT_NAME_LEN - 1);
         zb_events_emit(&avail_evt);
+
+        request_binding_table(dev, 0);
     }
     g_ictx.active = false;
 
@@ -551,6 +569,7 @@ void di_on_ieee_addr_resp(esp_zb_zdp_status_t zdo_status,
     device_record_t *dev = dm_find_by_ieee(ieee);
     if (dev) {
         dm_update_nwk(dev, nwk_addr);
+        request_binding_table(dev, 0);
         // Replay any buffered ZCL attributes
         zcl_pending_attr_replay(ieee, nwk_addr);
 
@@ -567,6 +586,84 @@ void di_on_ieee_addr_resp(esp_zb_zdp_status_t zdo_status,
             di_enqueue(dev);
         }
     }
+}
+
+static void request_binding_table(device_record_t *dev, uint8_t start_index)
+{
+    int dev_idx;
+
+    if (!dev || !dev->in_use) return;
+    if (dev->nwk_addr == 0 || dev->nwk_addr == 0xFFFF) return;
+    if (start_index == 0 && dev->binding_refresh_active) return;
+    dev_idx = dev_to_idx(dev);
+    if (dev_idx < 0) return;
+    if (start_index == 0) {
+        dev->binding_refresh_active = true;
+    }
+
+    ZB_LOG("BINDING_TABLE_REQ %s start=%u nwk=0x%04X",
+           dm_display_name(dev), start_index, dev->nwk_addr);
+    send_binding_table_req(dev->nwk_addr, start_index,
+                           (uint8_t)dev_idx);
+}
+
+void di_on_binding_table_resp(const esp_zb_zdo_binding_table_info_t *table_info,
+                              void *user_ctx)
+{
+    uint8_t dev_idx = (uint8_t)(uintptr_t)user_ctx;
+    device_record_t *dev = dm_get_by_index(dev_idx);
+
+    if (!dev || !table_info) {
+        return;
+    }
+
+    if (table_info->status != ESP_ZB_ZDP_STATUS_SUCCESS) {
+        dev->binding_refresh_active = false;
+        ZB_LOG("BINDING_TABLE_RSP %s FAILED status=0x%02X",
+               dm_display_name(dev), table_info->status);
+        return;
+    }
+
+    ZB_LOG("BINDING_TABLE_RSP %s index=%u count=%u total=%u",
+           dm_display_name(dev), table_info->index,
+           table_info->count, table_info->total);
+
+    if (table_info->index == 0) {
+        dm_clear_bindings(dev);
+    }
+
+    const esp_zb_zdo_binding_table_record_t *rec = table_info->record;
+    while (rec) {
+        binding_record_t binding = {
+            .cluster_id = rec->cluster_id,
+            .dst_addr_mode = rec->dst_addr_mode,
+            .dst_group_addr = 0,
+            .dst_ieee_addr = 0,
+            .dst_endpoint = rec->dst_endp,
+        };
+
+        if (rec->dst_addr_mode == BINDING_DST_ADDR_MODE_GROUP) {
+            binding.dst_group_addr = rec->dst_address.addr_short;
+            binding.dst_endpoint = 0;
+        } else if (rec->dst_addr_mode == BINDING_DST_ADDR_MODE_IEEE) {
+            memcpy(&binding.dst_ieee_addr, rec->dst_address.addr_long, 8);
+        }
+
+        if (!dm_add_binding(dev, rec->src_endp, &binding)) {
+            ZB_LOG("BINDING_TABLE_RSP %s drop src_ep=%u cluster=0x%04X",
+                   dm_display_name(dev), rec->src_endp, rec->cluster_id);
+        }
+        rec = rec->next;
+    }
+
+    uint16_t next_index = (uint16_t)table_info->index + (uint16_t)table_info->count;
+    if (next_index < table_info->total) {
+        request_binding_table(dev, (uint8_t)next_index);
+        return;
+    }
+
+    dev->binding_refresh_active = false;
+    nvs_cache_save_device(dev_idx);
 }
 
 void di_on_node_desc_resp(esp_zb_zdp_status_t zdo_status, uint16_t addr,

@@ -18,7 +18,7 @@
 #define NVS_NAMESPACE       "zb_cache"
 #define NVS_KEY_HEAD        "dt3_head"
 #define NVS_KEY_DEV_PREFIX  "dt3_d"
-#define NVS_CACHE_VERSION   3u   // bump on incompatible layout changes
+#define NVS_CACHE_VERSION   4u   // bump on incompatible layout changes
 
 // ---------------------------------------------------------------------------
 // Load the device table from NVS into the device_manager.
