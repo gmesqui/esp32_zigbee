@@ -1,4 +1,5 @@
 #pragma once
+#include <stdint.h>
 
 // ---------------------------------------------------------------------------
 // MQTT bridge — translates Zigbee events to zigbee2mqtt-compatible MQTT msgs.
@@ -32,3 +33,14 @@ void mqtt_bridge_on_connected(void);
  * Publishes deferred bridge/devices when transport conditions allow it.
  */
 void mqtt_bridge_poll(void);
+
+/** Schedule a retained bridge/devices refresh. */
+void mqtt_bridge_request_devices_refresh(void);
+
+/**
+ * Clear retained topics under the old device name and republish retained state
+ * under the new one, then schedule a bridge/devices refresh.
+ */
+void mqtt_bridge_republish_device_after_rename(uint64_t ieee,
+                                               const char *old_topic_name,
+                                               const char *new_topic_name);

@@ -66,6 +66,18 @@ device_record_t *dm_find_by_ieee(uint64_t ieee)
     return NULL;
 }
 
+device_record_t *dm_find_by_friendly_name(const char *name)
+{
+    if (!name || name[0] == '\0') return NULL;
+    for (int i = 0; i < MAX_DEVICES; i++) {
+        if (g_devices[i].in_use &&
+            strcmp(g_devices[i].friendly_name, name) == 0) {
+            return &g_devices[i];
+        }
+    }
+    return NULL;
+}
+
 device_record_t *dm_find_by_nwk(uint16_t nwk_addr)
 {
     if (nwk_addr == 0xFFFF) return NULL;

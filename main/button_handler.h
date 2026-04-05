@@ -1,5 +1,6 @@
 #pragma once
 #include <stdbool.h>
+#include <stdint.h>
 
 // ---------------------------------------------------------------------------
 // Board pin — adjust if the BOOT button is on a different GPIO
@@ -26,3 +27,10 @@ void button_handler_set_stack_ready(bool ready);
 // Returns true if permit-join is currently open.
 // ---------------------------------------------------------------------------
 bool button_handler_permit_join_active(void);
+
+// ---------------------------------------------------------------------------
+// Open or close permit-join for the specified duration.
+// duration_s == 0 closes the network; any other value opens it and refreshes
+// the expiry timer.
+// ---------------------------------------------------------------------------
+void button_handler_set_permit_join_duration(uint8_t duration_s);

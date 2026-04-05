@@ -7,6 +7,7 @@
 #include "freertos/FreeRTOS.h"
 #include "freertos/queue.h"
 #include "esp_zigbee_core.h"
+#include <inttypes.h>
 
 #define DEBOUNCE_MS         200u
 #define PERMIT_JOIN_SECS    180u
@@ -26,19 +27,18 @@ static QueueHandle_t      s_btn_queue     = NULL;
 // Permit-join open / close helpers
 // ---------------------------------------------------------------------------
 
-static void permit_join_open(void)
+static void permit_join_open(uint8_t duration_s)
 {
-    if (s_permit_active) return;
     s_permit_active = true;
     led_set_permit_join(true);
-    esp_zb_bdb_open_network(PERMIT_JOIN_SECS);
-    esp_timer_start_once(s_join_timer, (uint64_t)PERMIT_JOIN_SECS * 1000000ULL);
-    ZB_LOG("PERMIT_JOIN OPEN (%u s)", PERMIT_JOIN_SECS);
+    esp_zb_bdb_open_network(duration_s);
+    esp_timer_stop(s_join_timer);
+    esp_timer_start_once(s_join_timer, (uint64_t)duration_s * 1000000ULL);
+    ZB_LOG("PERMIT_JOIN OPEN (%"PRIu8" s)", duration_s);
 }
 
 static void permit_join_close(void)
 {
-    if (!s_permit_active) return;
     s_permit_active = false;
     led_set_permit_join(false);
     esp_zb_bdb_close_network();
@@ -90,7 +90,7 @@ static void btn_task(void *arg)
         if (ev == 0x01) {
             // Button press
             if (!s_permit_active) {
-                permit_join_open();
+                permit_join_open(PERMIT_JOIN_SECS);
             } else {
                 permit_join_close();
             }
@@ -170,4 +170,18 @@ void button_handler_set_stack_ready(bool ready)
 bool button_handler_permit_join_active(void)
 {
     return s_permit_active;
+}
+
+void button_handler_set_permit_join_duration(uint8_t duration_s)
+{
+    if (!s_stack_ready) {
+        ZB_LOG("PERMIT_JOIN request ignored: stack not ready");
+        return;
+    }
+
+    if (duration_s == 0) {
+        permit_join_close();
+    } else {
+        permit_join_open(duration_s);
+    }
 }

@@ -292,10 +292,10 @@ static void serial_cmd_task(void *arg)
                 break;
             case 'j':
                 if (!button_handler_permit_join_active()) {
-                    esp_zb_bdb_open_network(180);
+                    button_handler_set_permit_join_duration(180);
                     ZB_LOG("PERMIT_JOIN OPEN via serial (180s)");
                 } else {
-                    esp_zb_bdb_close_network();
+                    button_handler_set_permit_join_duration(0);
                     ZB_LOG("PERMIT_JOIN CLOSED via serial");
                 }
                 break;

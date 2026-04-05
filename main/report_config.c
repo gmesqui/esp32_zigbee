@@ -47,6 +47,15 @@ static const report_cfg_entry_t k_report_table[] = {
 };
 #define REPORT_TABLE_COUNT  (sizeof(k_report_table) / sizeof(k_report_table[0]))
 
+static void rc_configure_device_alarm(uint8_t dev_idx)
+{
+    device_record_t *dev = dm_get_by_index(dev_idx);
+    if (!dev || !dev->in_use) {
+        return;
+    }
+    rc_configure_device(dev);
+}
+
 static bool endpoint_has_input_cluster(const endpoint_record_t *ep, uint16_t cluster_id)
 {
     if (!ep) return false;
@@ -204,6 +213,18 @@ void rc_configure_device(device_record_t *dev)
         dev->reporting_configured = true;
         dev->dirty = true;
     }
+}
+
+void rc_configure_device_async(device_record_t *dev)
+{
+    int dev_idx;
+
+    if (!dev) return;
+
+    dev_idx = dm_index_of(dev);
+    if (dev_idx < 0) return;
+
+    esp_zb_scheduler_alarm(rc_configure_device_alarm, (uint8_t)dev_idx, 0);
 }
 
 // ---------------------------------------------------------------------------

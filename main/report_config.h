@@ -22,6 +22,9 @@
  *  Called by device_interview when STEP_CONFIGURE_REPORTING is reached. */
 void rc_configure_device(device_record_t *dev);
 
+/** Schedule configure-reporting from a non-Zigbee task. */
+void rc_configure_device_async(device_record_t *dev);
+
 typedef struct {
     uint16_t cluster_id;
     uint16_t attr_id;

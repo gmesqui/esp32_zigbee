@@ -210,10 +210,50 @@ o
 
 ## Mensajes entrantes
 
+Actualmente implementados:
+
+- `esp32_zigbee/bridge/request/health_check`
+- `esp32_zigbee/bridge/request/permit_join`
+- `esp32_zigbee/bridge/request/device/rename`
+- `esp32_zigbee/bridge/request/device/interview`
+- `esp32_zigbee/bridge/request/device/configure`
+
+Todos responden en:
+
+- `esp32_zigbee/bridge/response/<clave>`
+
+Formato de respuesta compatible con z2m:
+
+- `{"data":{...},"status":"ok"}`
+- `{"data":{},"error":"...","status":"error"}`
+- Si la peticion incluye `transaction`, se reenvia en la respuesta.
+
 ### Control de entidades
 
 - Topic: `esp32_zigbee/<nombre>/set`
 - Topic: `esp32_zigbee/<nombre>/set/<atributo>`
+
+Estado actual:
+
+- Implementado parcialmente.
+- Soportado hoy en `/set`:
+  - `state`
+  - `brightness`
+- Soportado hoy en `/get`:
+  - `state`
+  - `brightness`
+  - `temperature`
+  - `humidity`
+  - `pressure`
+  - `illuminance`
+  - `occupancy`
+  - `battery`
+  - `voltage`
+  - `power`
+  - `contact`
+  - `tamper`
+  - `battery_low`
+- Si el dispositivo no expone el cluster correspondiente, la orden se ignora y solo queda reflejada en logs.
 
 Ejemplos:
 
@@ -222,6 +262,42 @@ Ejemplos:
 ```
 
 o bien valor simple en subtopic.
+
+Ejemplos soportados:
+
+```json
+{"state":"ON","brightness":180}
+```
+
+para `esp32_zigbee/luz_salon/set`.
+
+Payload simple:
+
+```text
+ON
+```
+
+para `esp32_zigbee/luz_salon/set/state`.
+
+Payload simple:
+
+```text
+180
+```
+
+para `esp32_zigbee/luz_salon/set/brightness`.
+
+Lectura:
+
+```json
+{"state":"","brightness":"","power":""}
+```
+
+para `esp32_zigbee/luz_salon/get`.
+
+Lectura por subtopic:
+
+- payload vacio para `esp32_zigbee/luz_salon/get/state`.
 
 ### API del bridge
 
@@ -234,6 +310,27 @@ Ejemplo:
 ```
 
 para `esp32_zigbee/bridge/request/permit_join`.
+
+Ejemplos soportados:
+
+```json
+{"time":254}
+```
+
+para `esp32_zigbee/bridge/request/permit_join`.
+
+```json
+{"from":"sensor_salon","to":"sensor/cocina"}
+```
+
+para `esp32_zigbee/bridge/request/device/rename`.
+
+```json
+{"id":"sensor_salon"}
+```
+
+para `esp32_zigbee/bridge/request/device/interview` y
+`esp32_zigbee/bridge/request/device/configure`.
 
 ## Resumen Zigbee -> MQTT
 

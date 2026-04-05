@@ -5,6 +5,7 @@
 #include "device_definition.h"
 #include "report_config.h"
 #include "zcl_handler.h"
+#include "button_handler.h"
 #include "utils.h"
 
 #include <stdarg.h>
@@ -18,7 +19,7 @@
 // ---------------------------------------------------------------------------
 // Constants
 // ---------------------------------------------------------------------------
-#define BASE    "esp32_zigbee"
+#define BASE    MQTT_BASE_TOPIC
 #define B_STATE BASE "/bridge/state"
 #define B_INFO  BASE "/bridge/info"
 #define B_DEV   BASE "/bridge/devices"
@@ -368,6 +369,19 @@ static void schedule_bridge_devices_publish(TickType_t delay_ticks)
     s_bridge_devices_due_tick = xTaskGetTickCount() + delay_ticks;
 }
 
+static void build_bridge_info_json(char *buf, size_t buf_len)
+{
+    uint8_t ch = esp_zb_get_current_channel();
+    uint16_t pan = esp_zb_get_pan_id();
+
+    snprintf(buf, buf_len,
+             "{\"version\":\"1.0.0\","
+             "\"network\":{\"channel\":%u,\"pan_id\":\"0x%04X\"},"
+             "\"permit_join\":%s}",
+             ch, pan,
+             button_handler_permit_join_active() ? "true" : "false");
+}
+
 /** Publish directly via MQTT client (for use in mqtt_bridge_on_connected). */
 static void direct_pub(const char *topic, const char *payload,
                        int qos, int retain)
@@ -394,6 +408,17 @@ static void enqueue_pub(const char *topic, const char *payload,
                         uint8_t qos, bool retain)
 {
     mqtt_manager_publish(topic, payload, qos, retain);
+}
+
+static void pub_bridge_info(bool direct)
+{
+    char info[512];
+    build_bridge_info_json(info, sizeof(info));
+    if (direct) {
+        burst_pub(B_INFO, info, 1, 1, pdMS_TO_TICKS(20));
+    } else {
+        enqueue_pub(B_INFO, info, 1, true);
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -503,6 +528,7 @@ static void on_zigbee_event(const zb_event_t *evt)
                      "\"ieee_address\":\"%s\"}}",
                      name, ibuf);
             enqueue_pub(B_EVT, payload, 0, false);
+            mqtt_bridge_request_devices_refresh();
             break;
         }
 
@@ -517,6 +543,7 @@ static void on_zigbee_event(const zb_event_t *evt)
                      "\"ieee_address\":\"%s\"}}",
                      name, ibuf);
             enqueue_pub(B_EVT, payload, 0, false);
+            mqtt_bridge_request_devices_refresh();
             break;
         }
 
@@ -544,6 +571,9 @@ static void on_zigbee_event(const zb_event_t *evt)
                          name, ibuf, status);
             }
             enqueue_pub(B_EVT, payload, 0, false);
+            if (successful) {
+                mqtt_bridge_request_devices_refresh();
+            }
             break;
         }
 
@@ -565,6 +595,7 @@ static void on_zigbee_event(const zb_event_t *evt)
                      evt->permit_join_duration > 0 ? "true" : "false",
                      evt->permit_join_duration);
             enqueue_pub(B_EVT, payload, 0, false);
+            pub_bridge_info(false);
             break;
         }
 
@@ -585,17 +616,7 @@ void mqtt_bridge_on_connected(void)
     burst_pub(B_STATE, "{\"state\":\"online\"}", 1, 1, pdMS_TO_TICKS(20));
 
     // 2. Bridge info
-    {
-        char info[512];
-        uint8_t ch  = esp_zb_get_current_channel();
-        uint16_t pan = esp_zb_get_pan_id();
-        snprintf(info, sizeof(info),
-                 "{\"version\":\"1.0.0\","
-                 "\"network\":{\"channel\":%u,\"pan_id\":\"0x%04X\"},"
-                 "\"permit_join\":false}",
-                 ch, pan);
-        burst_pub(B_INFO, info, 1, 1, pdMS_TO_TICKS(20));
-    }
+    pub_bridge_info(true);
 
     // 3. All device states and availability
     {
@@ -676,4 +697,41 @@ void mqtt_bridge_init(void)
 {
     zb_events_register(on_zigbee_event);
     ZB_LOG("MQTT bridge: registered with event bus");
+}
+
+void mqtt_bridge_request_devices_refresh(void)
+{
+    schedule_bridge_devices_publish(pdMS_TO_TICKS(200));
+}
+
+void mqtt_bridge_republish_device_after_rename(uint64_t ieee,
+                                               const char *old_topic_name,
+                                               const char *new_topic_name)
+{
+    char topic[MQTT_MAX_TOPIC_LEN];
+
+    if (old_topic_name && new_topic_name &&
+        strcmp(old_topic_name, new_topic_name) != 0) {
+        snprintf(topic, sizeof(topic), BASE "/%s", old_topic_name);
+        enqueue_pub(topic, "", 0, true);
+
+        snprintf(topic, sizeof(topic), BASE "/%s/availability", old_topic_name);
+        enqueue_pub(topic, "", 1, true);
+    }
+
+    device_record_t *dev = dm_find_by_ieee(ieee);
+    if (dev && new_topic_name && new_topic_name[0] != '\0') {
+        zb_event_t evt = {
+            .type    = ZB_EVT_ATTR_CHANGED,
+            .ieee    = dev->ieee_addr,
+            .lqi     = dev->last_lqi,
+            .has_lqi = dev->radio_metrics_valid,
+        };
+        strncpy(evt.friendly_name, new_topic_name, ZB_EVT_NAME_LEN - 1);
+        evt.friendly_name[ZB_EVT_NAME_LEN - 1] = '\0';
+        pub_device_state_enqueue(&evt);
+        pub_availability(dev->ieee_addr, new_topic_name, dev->online, false);
+    }
+
+    mqtt_bridge_request_devices_refresh();
 }

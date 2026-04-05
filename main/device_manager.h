@@ -114,6 +114,9 @@ void dm_init(void);
 /** Find device by IEEE address. Returns NULL if not found. */
 device_record_t *dm_find_by_ieee(uint64_t ieee);
 
+/** Find device by friendly name. Returns NULL if not found. */
+device_record_t *dm_find_by_friendly_name(const char *name);
+
 /** Find device by NWK short address. Returns NULL if not found. */
 device_record_t *dm_find_by_nwk(uint16_t nwk_addr);
 

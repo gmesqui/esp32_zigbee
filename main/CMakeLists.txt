@@ -16,6 +16,7 @@ idf_component_register(
         "eth_driver.c"
         "mqtt_manager.c"
         "mqtt_bridge.c"
+        "mqtt_commands.c"
         "time_sync.c"
     INCLUDE_DIRS "."
     REQUIRES
@@ -30,4 +31,5 @@ idf_component_register(
         esp_event
         lwip
         mqtt
+        json
 )

@@ -12,6 +12,7 @@
 // The mqtt_task (priority 4) drains the queue and owns the MQTT client.
 // ---------------------------------------------------------------------------
 
+#define MQTT_BASE_TOPIC       "esp32_zigbee"
 #define MQTT_MAX_TOPIC_LEN    128
 #define MQTT_MAX_PAYLOAD_LEN  768
 #define MQTT_QUEUE_LEN        16

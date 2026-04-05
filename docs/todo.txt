@@ -1,6 +1,7 @@
-Implementar rename por mqtt
-Implementar esp32_zigbee/bridge/health
 Mejorar esp32_zigbee/bridge/info
 Resolver publicacion robusta de esp32_zigbee/bridge/devices cuando no cabe el JSON completo
 Temporalmente: si bridge/devices excede el buffer actual, no se publica para evitar retenidos truncados
 Ampliar el catalogo z2m de definition/exposes/options en esp32_zigbee/bridge/devices
+Ampliar esp32_zigbee/<nombre>/set a mas atributos z2m (p.ej. color_temp)
+Ampliar esp32_zigbee/<nombre>/get a mas atributos y lecturas agrupadas
+Revisar expose/options publicadas para no anunciar escrituras no soportadas
