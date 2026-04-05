@@ -79,6 +79,16 @@ void zcl_pending_attr_save(uint16_t nwk_addr, uint8_t ep,
 void zcl_pending_attr_replay(uint64_t ieee, uint16_t nwk_addr);
 
 // ---------------------------------------------------------------------------
+// Cache maintenance helpers
+// ---------------------------------------------------------------------------
+
+/** Clear unsupported-attribute markers for a device before re-interviewing it. */
+void zcl_clear_unsupported_attrs(uint64_t ieee);
+
+/** Remove all cached ZCL knowledge for a device that has been deleted. */
+void zcl_forget_device(uint64_t ieee);
+
+// ---------------------------------------------------------------------------
 // State JSON export (used by MQTT bridge for reconnect burst)
 // ---------------------------------------------------------------------------
 

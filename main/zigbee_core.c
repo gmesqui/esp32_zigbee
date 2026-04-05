@@ -237,6 +237,7 @@ void esp_zb_app_signal_handler(esp_zb_app_signal_t *signal_struct)
             ZB_LOG("SIGNAL LEAVE_INDICATION ieee=%s rejoin=%u",
                    ibuf, p->rejoin);
 
+            int removed_idx = -1;
             dm_lock();
             device_record_t *dev = dm_find_by_ieee(ieee);
             char leave_name[ZB_EVT_NAME_LEN] = {0};
@@ -245,10 +246,22 @@ void esp_zb_app_signal_handler(esp_zb_app_signal_t *signal_struct)
                 if (dm_set_online(dev, false)) {
                     ZB_LOG("DEVICE %s OFFLINE (leave)", dm_display_name(dev));
                 }
+                removed_idx = dm_index_of(dev);
+                if (removed_idx >= 0) {
+                    di_forget_device((uint8_t)removed_idx, dev->ieee_addr);
+                    zcl_forget_device(dev->ieee_addr);
+                    removed_idx = dm_remove(dev);
+                }
             }
             dm_unlock();
 
             if (!p->rejoin) {
+                if (removed_idx >= 0) {
+                    nvs_cache_delete_device((uint8_t)removed_idx);
+                    ZB_LOG("DEVICE %s REMOVED (leave)",
+                           leave_name[0] ? leave_name : ibuf);
+                }
+
                 zb_event_t evt = {
                     .type   = ZB_EVT_DEVICE_LEAVE,
                     .ieee   = ieee,

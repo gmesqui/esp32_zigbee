@@ -13,6 +13,7 @@
 #include "freertos/semphr.h"
 #include "zb_osif_platform.h"
 #include "nwk/esp_zigbee_nwk.h"
+#include "zcl/esp_zigbee_zcl_common.h"
 
 // ---------------------------------------------------------------------------
 // Attribute value cache
@@ -22,10 +23,24 @@ static attr_cache_entry_t  g_attr_cache[MAX_ATTR_CACHE];
 static pending_attr_t      g_pending[MAX_PENDING_ATTRS];
 static SemaphoreHandle_t   g_attr_mutex;
 
+#define MAX_UNSUPPORTED_ATTRS  64
+
+typedef struct {
+    uint64_t ieee_addr;
+    uint8_t  endpoint_id;
+    uint16_t cluster_id;
+    uint16_t attr_id;
+    uint32_t last_update_ms;
+    bool     in_use;
+} unsupported_attr_entry_t;
+
+static unsupported_attr_entry_t g_unsupported_attr_cache[MAX_UNSUPPORTED_ATTRS];
+
 void zcl_handler_init(void)
 {
     memset(g_attr_cache, 0, sizeof(g_attr_cache));
     memset(g_pending,    0, sizeof(g_pending));
+    memset(g_unsupported_attr_cache, 0, sizeof(g_unsupported_attr_cache));
     g_attr_mutex = xSemaphoreCreateMutex();
     configASSERT(g_attr_mutex);
 }
@@ -61,6 +76,100 @@ static attr_cache_entry_t *cache_alloc(void)
         }
     }
     return oldest;
+}
+
+static unsupported_attr_entry_t *unsupported_find(uint64_t ieee, uint8_t ep,
+                                                  uint16_t cluster,
+                                                  uint16_t attr_id)
+{
+    for (int i = 0; i < MAX_UNSUPPORTED_ATTRS; i++) {
+        unsupported_attr_entry_t *e = &g_unsupported_attr_cache[i];
+        if (e->in_use && e->ieee_addr == ieee && e->endpoint_id == ep &&
+            e->cluster_id == cluster && e->attr_id == attr_id) {
+            return e;
+        }
+    }
+    return NULL;
+}
+
+static unsupported_attr_entry_t *unsupported_alloc(void)
+{
+    for (int i = 0; i < MAX_UNSUPPORTED_ATTRS; i++) {
+        if (!g_unsupported_attr_cache[i].in_use) {
+            return &g_unsupported_attr_cache[i];
+        }
+    }
+
+    uint32_t oldest_ms = UINT32_MAX;
+    unsupported_attr_entry_t *oldest = &g_unsupported_attr_cache[0];
+    for (int i = 0; i < MAX_UNSUPPORTED_ATTRS; i++) {
+        if (g_unsupported_attr_cache[i].last_update_ms < oldest_ms) {
+            oldest_ms = g_unsupported_attr_cache[i].last_update_ms;
+            oldest = &g_unsupported_attr_cache[i];
+        }
+    }
+    return oldest;
+}
+
+static bool unsupported_has_attr_locked(uint64_t ieee, uint8_t ep,
+                                        uint16_t cluster, uint16_t attr_id)
+{
+    return unsupported_find(ieee, ep, cluster, attr_id) != NULL;
+}
+
+static bool unsupported_has_attr(uint64_t ieee, uint8_t ep,
+                                 uint16_t cluster, uint16_t attr_id)
+{
+    xSemaphoreTake(g_attr_mutex, portMAX_DELAY);
+    bool has_attr = unsupported_has_attr_locked(ieee, ep, cluster, attr_id);
+    xSemaphoreGive(g_attr_mutex);
+    return has_attr;
+}
+
+static void unsupported_mark_attr(uint64_t ieee, uint8_t ep,
+                                  uint16_t cluster, uint16_t attr_id)
+{
+    xSemaphoreTake(g_attr_mutex, portMAX_DELAY);
+    unsupported_attr_entry_t *e = unsupported_find(ieee, ep, cluster, attr_id);
+    if (!e) {
+        e = unsupported_alloc();
+        e->ieee_addr = ieee;
+        e->endpoint_id = ep;
+        e->cluster_id = cluster;
+        e->attr_id = attr_id;
+        e->in_use = true;
+    }
+    e->last_update_ms = utils_uptime_ms();
+    xSemaphoreGive(g_attr_mutex);
+}
+
+static void unsupported_clear_attr_locked(uint64_t ieee, uint8_t ep,
+                                          uint16_t cluster, uint16_t attr_id)
+{
+    unsupported_attr_entry_t *e = unsupported_find(ieee, ep, cluster, attr_id);
+    if (e) {
+        memset(e, 0, sizeof(*e));
+    }
+}
+
+static void unsupported_clear_device_locked(uint64_t ieee)
+{
+    for (int i = 0; i < MAX_UNSUPPORTED_ATTRS; i++) {
+        unsupported_attr_entry_t *e = &g_unsupported_attr_cache[i];
+        if (e->in_use && e->ieee_addr == ieee) {
+            memset(e, 0, sizeof(*e));
+        }
+    }
+}
+
+static void attr_cache_clear_device_locked(uint64_t ieee)
+{
+    for (int i = 0; i < MAX_ATTR_CACHE; i++) {
+        attr_cache_entry_t *e = &g_attr_cache[i];
+        if (e->in_use && e->ieee_addr == ieee) {
+            memset(e, 0, sizeof(*e));
+        }
+    }
 }
 
 /** Store or update a cached value. Returns true if the value changed.
@@ -269,7 +378,8 @@ static void maybe_probe_sleepy_device(device_record_t *dev, uint8_t ep,
         uint8_t missing_count = 0;
         for (int a = 0; a < entry->attr_count; a++) {
             uint16_t attr_id = entry->attrs[a];
-            if (!cache_has_attr(dev->ieee_addr, ep, entry->cluster_id, attr_id)) {
+            if (!cache_has_attr(dev->ieee_addr, ep, entry->cluster_id, attr_id) &&
+                !unsupported_has_attr(dev->ieee_addr, ep, entry->cluster_id, attr_id)) {
                 missing_attrs[missing_count++] = attr_id;
             }
         }
@@ -436,6 +546,7 @@ static bool process_attribute(device_record_t *dev, uint8_t ep,
     xSemaphoreTake(g_attr_mutex, portMAX_DELAY);
     bool changed = cache_update(dev->ieee_addr, ep, cluster,
                                  attr_id, attr_type, val, (uint8_t)sz);
+    unsupported_clear_attr_locked(dev->ieee_addr, ep, cluster, attr_id);
     xSemaphoreGive(g_attr_mutex);
 
     if (changed) {
@@ -571,6 +682,10 @@ esp_err_t zcl_on_read_attr_resp(const esp_zb_zcl_cmd_read_attr_resp_message_t *m
             dev->read_rsp_fail++;
             ZB_LOG("RX READ_ATTR_RSP %s attr=0x%04X status=0x%02X (fail)",
                    dm_display_name(dev), var->attribute.id, var->status);
+            if (var->status == ESP_ZB_ZCL_STATUS_UNSUP_ATTRIB) {
+                unsupported_mark_attr(dev->ieee_addr, msg->info.src_endpoint,
+                                      msg->info.cluster, var->attribute.id);
+            }
             if (is_recent_probe(dev)) {
                 ZB_LOG("SLEEPY_PROBE %s attr=0x%04X failed status=0x%02X",
                        dm_display_name(dev), var->attribute.id, var->status);
@@ -582,11 +697,15 @@ esp_err_t zcl_on_read_attr_resp(const esp_zb_zcl_cmd_read_attr_resp_message_t *m
     if (is_recent_probe(dev)) {
         bool has_battery = cache_has_attr(dev->ieee_addr, msg->info.src_endpoint, 0x0001, 0x0021);
         bool has_voltage = cache_has_attr(dev->ieee_addr, msg->info.src_endpoint, 0x0001, 0x0020);
+        bool battery_unsupported = unsupported_has_attr(dev->ieee_addr, msg->info.src_endpoint,
+                                                        0x0001, 0x0021);
+        bool voltage_unsupported = unsupported_has_attr(dev->ieee_addr, msg->info.src_endpoint,
+                                                        0x0001, 0x0020);
         ZB_LOG("SLEEPY_PROBE %s response cluster=%s rssi=%d lqi=%u battery=%s voltage=%s",
                dm_display_name(dev), utils_cluster_name(msg->info.cluster),
                msg->info.header.rssi, dev->last_lqi,
-               has_battery ? "yes" : "no",
-               has_voltage ? "yes" : "no");
+               has_battery ? "yes" : (battery_unsupported ? "unsupported" : "no"),
+               has_voltage ? "yes" : (voltage_unsupported ? "unsupported" : "no"));
     }
 
     if (any_changed) {
@@ -734,6 +853,21 @@ void zcl_pending_attr_replay(uint64_t ieee, uint16_t nwk_addr)
                           p->attr_id, p->attr_type, p->value, true);
         p->in_use = false;
     }
+}
+
+void zcl_clear_unsupported_attrs(uint64_t ieee)
+{
+    xSemaphoreTake(g_attr_mutex, portMAX_DELAY);
+    unsupported_clear_device_locked(ieee);
+    xSemaphoreGive(g_attr_mutex);
+}
+
+void zcl_forget_device(uint64_t ieee)
+{
+    xSemaphoreTake(g_attr_mutex, portMAX_DELAY);
+    attr_cache_clear_device_locked(ieee);
+    unsupported_clear_device_locked(ieee);
+    xSemaphoreGive(g_attr_mutex);
 }
 
 // ---------------------------------------------------------------------------

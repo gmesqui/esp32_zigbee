@@ -95,6 +95,7 @@ typedef struct {
     uint32_t  interview_attempts;
     uint32_t  last_probe_ms;
     bool      binding_refresh_active;
+    uint16_t  slot_generation;
 
     // --- Internal flags ---
     bool      dirty;          // needs NVS write
@@ -119,8 +120,14 @@ device_record_t *dm_find_by_nwk(uint16_t nwk_addr);
 /** Return device at slot index [0..MAX_DEVICES-1]. NULL if slot empty. */
 device_record_t *dm_get_by_index(uint8_t idx);
 
+/** Return device at slot index only if the current generation still matches. */
+device_record_t *dm_get_by_index_generation(uint8_t idx, uint16_t generation);
+
 /** Return number of occupied slots. */
 uint8_t dm_count(void);
+
+/** Return the current slot generation. Zero if idx is out of range. */
+uint16_t dm_slot_generation(uint8_t idx);
 
 // ---------------------------------------------------------------------------
 // Create / update
@@ -145,6 +152,12 @@ bool dm_set_online(device_record_t *dev, bool online);
 
 /** Set friendly name. Truncated to FRIENDLY_NAME_LEN-1 chars. Marks dirty. */
 void dm_set_friendly_name(device_record_t *dev, const char *name);
+
+/** Return slot index for a device pointer, or -1 if it does not belong to the table. */
+int dm_index_of(const device_record_t *dev);
+
+/** Remove one device from the RAM table and free its slot. Returns removed index or -1. */
+int dm_remove(device_record_t *dev);
 
 // ---------------------------------------------------------------------------
 // Presence timer — call every ~30 s to mark stale devices offline.

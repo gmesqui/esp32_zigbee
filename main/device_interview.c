@@ -27,6 +27,7 @@ typedef enum {
 
 typedef struct {
     uint8_t   dev_idx;          // index into g_devices
+    uint64_t  ieee_addr;        // guards against slot reuse
     istate_t  state;
     uint8_t   ep_cursor;        // which endpoint we are currently querying
     uint8_t   retry;
@@ -64,16 +65,51 @@ static bool iq_pop(uint8_t *idx)
     return true;
 }
 
+static void iq_remove(uint8_t idx)
+{
+    if (g_iq_count == 0) return;
+
+    uint8_t tmp[IQUEUE_SIZE];
+    uint8_t kept = 0;
+
+    while (g_iq_count > 0) {
+        uint8_t entry = 0;
+        iq_pop(&entry);
+        if (entry != idx) {
+            tmp[kept++] = entry;
+        }
+    }
+
+    g_iq_head = 0;
+    g_iq_tail = 0;
+    g_iq_count = 0;
+    for (uint8_t i = 0; i < kept; i++) {
+        iq_push(tmp[i]);
+    }
+}
+
 // ---------------------------------------------------------------------------
-// Find slot index for a device record pointer
+// Device callback context helpers
 // ---------------------------------------------------------------------------
 
-static int dev_to_idx(const device_record_t *dev)
+static void *make_dev_ctx(uint8_t dev_idx)
 {
-    for (int i = 0; i < MAX_DEVICES; i++) {
-        if (dm_get_by_index(i) == dev) return i;
+    uintptr_t ctx = (uintptr_t)dev_idx;
+    ctx |= ((uintptr_t)dm_slot_generation(dev_idx) << 8);
+    return (void *)ctx;
+}
+
+static device_record_t *ctx_get_device(void *user_ctx, uint8_t *dev_idx_out)
+{
+    uintptr_t ctx = (uintptr_t)user_ctx;
+    uint8_t dev_idx = (uint8_t)(ctx & 0xFFu);
+    uint16_t generation = (uint16_t)((ctx >> 8) & 0xFFFFu);
+
+    if (dev_idx_out) {
+        *dev_idx_out = dev_idx;
     }
-    return -1;
+
+    return dm_get_by_index_generation(dev_idx, generation);
 }
 
 // ---------------------------------------------------------------------------
@@ -95,21 +131,21 @@ static void send_node_desc(uint16_t nwk_addr, uint8_t dev_idx)
 {
     esp_zb_zdo_node_desc_req_param_t p = { .dst_nwk_addr = nwk_addr };
     esp_zb_zdo_node_desc_req(&p, di_on_node_desc_resp,
-                              (void *)(uintptr_t)dev_idx);
+                              make_dev_ctx(dev_idx));
 }
 
 static void send_power_desc(uint16_t nwk_addr, uint8_t dev_idx)
 {
     esp_zb_zdo_power_desc_req_param_t p = { .dst_nwk_addr = nwk_addr };
     esp_zb_zdo_power_desc_req(&p, di_on_power_desc_resp,
-                               (void *)(uintptr_t)dev_idx);
+                               make_dev_ctx(dev_idx));
 }
 
 static void send_active_ep(uint16_t nwk_addr, uint8_t dev_idx)
 {
     esp_zb_zdo_active_ep_req_param_t p = { .addr_of_interest = nwk_addr };
     esp_zb_zdo_active_ep_req(&p, di_on_active_ep_resp,
-                              (void *)(uintptr_t)dev_idx);
+                              make_dev_ctx(dev_idx));
 }
 
 static void send_simple_desc(uint16_t nwk_addr, uint8_t ep_id, uint8_t dev_idx)
@@ -119,7 +155,7 @@ static void send_simple_desc(uint16_t nwk_addr, uint8_t ep_id, uint8_t dev_idx)
         .endpoint         = ep_id,
     };
     esp_zb_zdo_simple_desc_req(&p, di_on_simple_desc_resp,
-                                (void *)(uintptr_t)dev_idx);
+                                make_dev_ctx(dev_idx));
 }
 
 static void send_binding_table_req(uint16_t nwk_addr, uint8_t start_index,
@@ -130,7 +166,7 @@ static void send_binding_table_req(uint16_t nwk_addr, uint8_t start_index,
         .dst_addr = nwk_addr,
     };
     esp_zb_zdo_binding_table_req(&p, di_on_binding_table_resp,
-                                 (void *)(uintptr_t)dev_idx);
+                                 make_dev_ctx(dev_idx));
 }
 
 static void send_read_basic(uint16_t nwk_addr, uint8_t ep_id)
@@ -189,6 +225,7 @@ static const startup_refresh_entry_t k_startup_refresh_table[] = {
 
 typedef struct {
     uint8_t dev_idx;
+    uint64_t ieee_addr;
     bool    active;
 } startup_probe_ctx_t;
 
@@ -263,11 +300,13 @@ static void startup_probe_schedule_next(uint8_t current_idx)
         if (dev->is_sleepy) continue;
 
         g_probe_ctx.dev_idx = idx;
+        g_probe_ctx.ieee_addr = dev->ieee_addr;
         g_probe_ctx.active = true;
         esp_zb_scheduler_alarm(startup_probe_alarm, idx, 1200);
         return;
     }
 
+    g_probe_ctx.ieee_addr = 0;
     g_probe_ctx.active = false;
 }
 
@@ -278,13 +317,18 @@ static void startup_probe_alarm(uint8_t dev_idx)
 
 static void startup_probe_step(uint8_t dev_idx)
 {
+    if (!g_probe_ctx.active || g_probe_ctx.dev_idx != dev_idx) {
+        return;
+    }
+
     if (g_ictx.active) {
         esp_zb_scheduler_alarm(startup_probe_alarm, dev_idx, 1500);
         return;
     }
 
     device_record_t *dev = dm_get_by_index(dev_idx);
-    if (!dev || !dev->in_use || dev->state < DEV_STATE_INTERVIEWED || dev->is_sleepy) {
+    if (!dev || !dev->in_use || dev->ieee_addr != g_probe_ctx.ieee_addr ||
+        dev->state < DEV_STATE_INTERVIEWED || dev->is_sleepy) {
         startup_probe_schedule_next(dev_idx);
         return;
     }
@@ -319,6 +363,8 @@ static void interview_fail(uint8_t dev_idx)
         strncpy(evt.friendly_name, dev->friendly_name, ZB_EVT_NAME_LEN - 1);
         zb_events_emit(&evt);
     }
+    g_ictx.ieee_addr = 0;
+    g_ictx.state = ISTATE_IDLE;
     g_ictx.active = false;
 
     // Try next device in queue
@@ -362,6 +408,8 @@ static void interview_done(uint8_t dev_idx)
 
         request_binding_table(dev, 0);
     }
+    g_ictx.ieee_addr = 0;
+    g_ictx.state = ISTATE_IDLE;
     g_ictx.active = false;
 
     uint8_t next;
@@ -381,8 +429,14 @@ static void alarm_start_step(uint8_t dev_idx)
 
 static void interview_step(uint8_t dev_idx)
 {
+    if (!g_ictx.active || g_ictx.dev_idx != dev_idx) {
+        return;
+    }
+
     device_record_t *dev = dm_get_by_index(dev_idx);
-    if (!dev || !dev->in_use) {
+    if (!dev || !dev->in_use || dev->ieee_addr != g_ictx.ieee_addr) {
+        g_ictx.ieee_addr = 0;
+        g_ictx.state = ISTATE_IDLE;
         g_ictx.active = false;
         return;
     }
@@ -467,10 +521,12 @@ static void start_interview(uint8_t dev_idx)
     device_record_t *dev = dm_get_by_index(dev_idx);
     if (!dev) return;
 
+    zcl_clear_unsupported_attrs(dev->ieee_addr);
     dev->state = DEV_STATE_INTERVIEWING;
     dev->interview_attempts++;
 
     g_ictx.dev_idx   = dev_idx;
+    g_ictx.ieee_addr = dev->ieee_addr;
     g_ictx.state     = ISTATE_NODE_DESC;
     g_ictx.ep_cursor = 0;
     g_ictx.retry     = 0;
@@ -506,7 +562,7 @@ void di_init(void)
 void di_enqueue(device_record_t *dev)
 {
     if (!dev) return;
-    int idx = dev_to_idx(dev);
+    int idx = dm_index_of(dev);
     if (idx < 0) return;
 
     // Already in queue or being interviewed?
@@ -541,6 +597,33 @@ void di_startup_probe_known_devices(void)
 {
     if (g_probe_ctx.active) return;
     startup_probe_schedule_next((uint8_t)-1);
+}
+
+void di_forget_device(uint8_t dev_idx, uint64_t ieee)
+{
+    iq_remove(dev_idx);
+
+    if (g_probe_ctx.active &&
+        g_probe_ctx.dev_idx == dev_idx &&
+        g_probe_ctx.ieee_addr == ieee) {
+        g_probe_ctx.active = false;
+        g_probe_ctx.ieee_addr = 0;
+    }
+
+    if (g_ictx.active &&
+        g_ictx.dev_idx == dev_idx &&
+        g_ictx.ieee_addr == ieee) {
+        uint8_t next = 0;
+        bool have_next = iq_pop(&next);
+
+        g_ictx.active = false;
+        g_ictx.state = ISTATE_IDLE;
+        g_ictx.ieee_addr = 0;
+
+        if (have_next) {
+            esp_zb_scheduler_alarm(alarm_start_step, next, 100);
+        }
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -595,7 +678,7 @@ static void request_binding_table(device_record_t *dev, uint8_t start_index)
     if (!dev || !dev->in_use) return;
     if (dev->nwk_addr == 0 || dev->nwk_addr == 0xFFFF) return;
     if (start_index == 0 && dev->binding_refresh_active) return;
-    dev_idx = dev_to_idx(dev);
+    dev_idx = dm_index_of(dev);
     if (dev_idx < 0) return;
     if (start_index == 0) {
         dev->binding_refresh_active = true;
@@ -610,10 +693,10 @@ static void request_binding_table(device_record_t *dev, uint8_t start_index)
 void di_on_binding_table_resp(const esp_zb_zdo_binding_table_info_t *table_info,
                               void *user_ctx)
 {
-    uint8_t dev_idx = (uint8_t)(uintptr_t)user_ctx;
-    device_record_t *dev = dm_get_by_index(dev_idx);
+    uint8_t dev_idx = 0;
+    device_record_t *dev = ctx_get_device(user_ctx, &dev_idx);
 
-    if (!dev || !table_info) {
+    if (!dev || !table_info || !dev->binding_refresh_active) {
         return;
     }
 
@@ -669,8 +752,13 @@ void di_on_binding_table_resp(const esp_zb_zdo_binding_table_info_t *table_info,
 void di_on_node_desc_resp(esp_zb_zdp_status_t zdo_status, uint16_t addr,
                            esp_zb_af_node_desc_t *node_desc, void *user_ctx)
 {
-    uint8_t dev_idx = (uint8_t)(uintptr_t)user_ctx;
-    device_record_t *dev = dm_get_by_index(dev_idx);
+    uint8_t dev_idx = 0;
+    device_record_t *dev = ctx_get_device(user_ctx, &dev_idx);
+
+    if (!g_ictx.active || g_ictx.dev_idx != dev_idx ||
+        !dev || dev->ieee_addr != g_ictx.ieee_addr) {
+        return;
+    }
 
     if (zdo_status != ESP_ZB_ZDP_STATUS_SUCCESS || !node_desc) {
         ZB_LOG("INTERVIEW %s NODE_DESC FAILED status=0x%02X",
@@ -705,8 +793,13 @@ void di_on_node_desc_resp(esp_zb_zdp_status_t zdo_status, uint16_t addr,
 
 void di_on_power_desc_resp(esp_zb_zdo_power_desc_rsp_t *resp, void *user_ctx)
 {
-    uint8_t dev_idx = (uint8_t)(uintptr_t)user_ctx;
-    device_record_t *dev = dm_get_by_index(dev_idx);
+    uint8_t dev_idx = 0;
+    device_record_t *dev = ctx_get_device(user_ctx, &dev_idx);
+
+    if (!g_ictx.active || g_ictx.dev_idx != dev_idx ||
+        !dev || dev->ieee_addr != g_ictx.ieee_addr) {
+        return;
+    }
 
     if (!resp || resp->status != ESP_ZB_ZDP_STATUS_SUCCESS) {
         ZB_LOG("INTERVIEW %s POWER_DESC FAILED (non-fatal, continuing)",
@@ -732,8 +825,13 @@ void di_on_power_desc_resp(esp_zb_zdo_power_desc_rsp_t *resp, void *user_ctx)
 void di_on_active_ep_resp(esp_zb_zdp_status_t zdo_status, uint8_t ep_count,
                            uint8_t *ep_id_list, void *user_ctx)
 {
-    uint8_t dev_idx = (uint8_t)(uintptr_t)user_ctx;
-    device_record_t *dev = dm_get_by_index(dev_idx);
+    uint8_t dev_idx = 0;
+    device_record_t *dev = ctx_get_device(user_ctx, &dev_idx);
+
+    if (!g_ictx.active || g_ictx.dev_idx != dev_idx ||
+        !dev || dev->ieee_addr != g_ictx.ieee_addr) {
+        return;
+    }
 
     if (zdo_status != ESP_ZB_ZDP_STATUS_SUCCESS || !ep_id_list) {
         ZB_LOG("INTERVIEW %s ACTIVE_EP FAILED status=0x%02X",
@@ -769,8 +867,13 @@ void di_on_simple_desc_resp(esp_zb_zdp_status_t zdo_status,
                              esp_zb_af_simple_desc_1_1_t *simple_desc,
                              void *user_ctx)
 {
-    uint8_t dev_idx = (uint8_t)(uintptr_t)user_ctx;
-    device_record_t *dev = dm_get_by_index(dev_idx);
+    uint8_t dev_idx = 0;
+    device_record_t *dev = ctx_get_device(user_ctx, &dev_idx);
+
+    if (!g_ictx.active || g_ictx.dev_idx != dev_idx ||
+        !dev || dev->ieee_addr != g_ictx.ieee_addr) {
+        return;
+    }
 
     if (zdo_status != ESP_ZB_ZDP_STATUS_SUCCESS || !simple_desc) {
         ZB_LOG("INTERVIEW %s SIMPLE_DESC ep_cursor=%u FAILED status=0x%02X",

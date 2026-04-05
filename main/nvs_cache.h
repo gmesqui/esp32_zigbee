@@ -39,6 +39,11 @@ void nvs_cache_save_dirty(void);
 void nvs_cache_save_device(uint8_t slot_idx);
 
 // ---------------------------------------------------------------------------
+// Remove a single device slot from NVS and refresh the cache header.
+// ---------------------------------------------------------------------------
+void nvs_cache_delete_device(uint8_t slot_idx);
+
+// ---------------------------------------------------------------------------
 // Erase all device cache from NVS (factory reset of device list).
 // ---------------------------------------------------------------------------
 void nvs_cache_erase(void);

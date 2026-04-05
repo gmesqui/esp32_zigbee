@@ -229,6 +229,12 @@ static void make_key(uint8_t idx, char *key, size_t key_len)
     snprintf(key, key_len, "%s%02u", NVS_KEY_DEV_PREFIX, (unsigned)idx);
 }
 
+static esp_err_t write_head(nvs_handle_t handle)
+{
+    uint8_t head[2] = { NVS_CACHE_VERSION, (uint8_t)dm_count() };
+    return nvs_set_blob(handle, NVS_KEY_HEAD, head, sizeof(head));
+}
+
 // ---------------------------------------------------------------------------
 // Public API
 // ---------------------------------------------------------------------------
@@ -301,9 +307,34 @@ void nvs_cache_save_device(uint8_t idx)
     }
 
     // Update header
-    uint8_t head[2] = { NVS_CACHE_VERSION, (uint8_t)dm_count() };
-    nvs_set_blob(handle, NVS_KEY_HEAD, head, sizeof(head));
+    write_head(handle);
     nvs_commit(handle);
+    nvs_close(handle);
+}
+
+void nvs_cache_delete_device(uint8_t idx)
+{
+    nvs_handle_t handle;
+    esp_err_t err = nvs_open(NVS_NAMESPACE, NVS_READWRITE, &handle);
+    if (err != ESP_OK) {
+        ZB_LOG("NVS cache: open for delete failed (%d)", err);
+        return;
+    }
+
+    char key[16];
+    make_key(idx, key, sizeof(key));
+    err = nvs_erase_key(handle, key);
+    if (err != ESP_OK && err != ESP_ERR_NVS_NOT_FOUND) {
+        ZB_LOG("NVS cache: erase error for slot %u (%d)", idx, err);
+    }
+
+    err = write_head(handle);
+    if (err != ESP_OK) {
+        ZB_LOG("NVS cache: header update failed after delete (%d)", err);
+    } else {
+        nvs_commit(handle);
+        ZB_LOG("NVS cache: deleted slot %u", idx);
+    }
     nvs_close(handle);
 }
 

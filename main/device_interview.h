@@ -40,6 +40,9 @@ void di_trigger_ieee_resolve(uint16_t nwk_addr);
  *  Sends read requests to recover availability and refresh cached state. */
 void di_startup_probe_known_devices(void);
 
+/** Cancel pending interview/probe work for a device that is being removed. */
+void di_forget_device(uint8_t dev_idx, uint64_t ieee);
+
 // ---------------------------------------------------------------------------
 // ZDO response callbacks — registered with the SDK and called from Zigbee
 // task context.  Signatures match the esp_zb_zdo_*_callback_t typedefs.

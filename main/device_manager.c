@@ -83,6 +83,14 @@ device_record_t *dm_get_by_index(uint8_t idx)
     return &g_devices[idx];
 }
 
+device_record_t *dm_get_by_index_generation(uint8_t idx, uint16_t generation)
+{
+    if (idx >= MAX_DEVICES) return NULL;
+    if (!g_devices[idx].in_use) return NULL;
+    if (g_devices[idx].slot_generation != generation) return NULL;
+    return &g_devices[idx];
+}
+
 // ---------------------------------------------------------------------------
 // Create / update
 // ---------------------------------------------------------------------------
@@ -108,10 +116,13 @@ device_record_t *dm_get_or_create(uint64_t ieee, uint16_t nwk_addr)
     for (int i = 0; i < MAX_DEVICES; i++) {
         if (!g_devices[i].in_use) {
             device_record_t *d = &g_devices[i];
+            uint16_t next_generation = (uint16_t)(d->slot_generation + 1u);
+            if (next_generation == 0) next_generation = 1;
             memset(d, 0, sizeof(*d));
             d->ieee_addr = ieee;
             d->nwk_addr  = nwk_addr;
             d->state     = DEV_STATE_NEW;
+            d->slot_generation = next_generation;
             d->in_use    = true;
             d->dirty     = true;
             g_count++;
@@ -172,6 +183,49 @@ void dm_set_friendly_name(device_record_t *dev, const char *name)
     dev->dirty = true;
     ZB_LOG("DEVICE %s friendly_name set to \"%s\"",
            dm_display_name(dev), dev->friendly_name);
+}
+
+int dm_index_of(const device_record_t *dev)
+{
+    if (!dev) return -1;
+
+    for (int i = 0; i < MAX_DEVICES; i++) {
+        if (&g_devices[i] == dev) {
+            return i;
+        }
+    }
+
+    return -1;
+}
+
+int dm_remove(device_record_t *dev)
+{
+    int idx = dm_index_of(dev);
+    if (idx < 0) return -1;
+
+    device_record_t *slot = &g_devices[idx];
+    if (!slot->in_use) return -1;
+
+    char ibuf[20];
+    utils_ieee_to_str(slot->ieee_addr, ibuf, sizeof(ibuf));
+
+    uint16_t next_generation = (uint16_t)(slot->slot_generation + 1u);
+    if (next_generation == 0) next_generation = 1;
+
+    memset(slot, 0, sizeof(*slot));
+    slot->slot_generation = next_generation;
+    if (g_count > 0) {
+        g_count--;
+    }
+
+    ZB_LOG("DEVICE removed slot=%d ieee=%s", idx, ibuf);
+    return idx;
+}
+
+uint16_t dm_slot_generation(uint8_t idx)
+{
+    if (idx >= MAX_DEVICES) return 0;
+    return g_devices[idx].slot_generation;
 }
 
 // ---------------------------------------------------------------------------
