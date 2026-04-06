@@ -15,6 +15,7 @@
 #include "freertos/task.h"
 #include "esp_zigbee_core.h"   // esp_zb_get_current_channel, esp_zb_get_pan_id
 #include "esp_heap_caps.h"
+#include "sdkconfig.h"
 
 // ---------------------------------------------------------------------------
 // Constants
@@ -28,6 +29,9 @@
 #define BRIDGE_DEVICES_INITIAL_DELAY_MS 2000u
 #define BRIDGE_DEVICES_RETRY_DELAY_MS   2000u
 #define BRIDGE_DEVICES_MIN_DMA_HEAP     16384u
+#define BRIDGE_PUBLIC_VERSION           "2.9.1"
+#define BRIDGE_PUBLIC_COMMIT            "7419695"
+#define BRIDGE_LOG_LEVEL                "info"
 
 static bool s_bridge_devices_pending = false;
 static TickType_t s_bridge_devices_due_tick = 0;
@@ -103,6 +107,26 @@ static void json_append_string(char **p, char *end, const char *value)
 static bool json_buffer_truncated(const char *p, const char *end)
 {
     return p && end && p >= end;
+}
+
+static void zigbee_ieee_to_str(const esp_zb_ieee_addr_t ieee,
+                               char *buf, size_t buf_len)
+{
+    snprintf(buf, buf_len,
+             "0x%02x%02x%02x%02x%02x%02x%02x%02x",
+             ieee[7], ieee[6], ieee[5], ieee[4],
+             ieee[3], ieee[2], ieee[1], ieee[0]);
+}
+
+static void append_ieee_array_json(char **p, char *end,
+                                   const esp_zb_ieee_addr_t ieee)
+{
+    json_append(p, end, "[");
+    for (int i = 0; i < 8; i++) {
+        if (i) json_append(p, end, ",");
+        json_append(p, end, "%u", ieee[i]);
+    }
+    json_append(p, end, "]");
 }
 
 static const char *z2m_interview_state(const device_record_t *dev)
@@ -242,10 +266,7 @@ static void append_coordinator_entry_json(char **p, char *end)
     char ieee_str[20];
 
     esp_zb_get_long_address(coord_ieee);
-    snprintf(ieee_str, sizeof(ieee_str),
-             "0x%02x%02x%02x%02x%02x%02x%02x%02x",
-             coord_ieee[7], coord_ieee[6], coord_ieee[5], coord_ieee[4],
-             coord_ieee[3], coord_ieee[2], coord_ieee[1], coord_ieee[0]);
+    zigbee_ieee_to_str(coord_ieee, ieee_str, sizeof(ieee_str));
 
     json_append(p, end, "{");
     json_append(p, end, "\"disabled\":false,");
@@ -369,17 +390,108 @@ static void schedule_bridge_devices_publish(TickType_t delay_ticks)
     s_bridge_devices_due_tick = xTaskGetTickCount() + delay_ticks;
 }
 
-static void build_bridge_info_json(char *buf, size_t buf_len)
+static void build_bridge_info_json_fallback(char *buf, size_t buf_len)
 {
     uint8_t ch = esp_zb_get_current_channel();
     uint16_t pan = esp_zb_get_pan_id();
+    esp_zb_ieee_addr_t ext_pan = {0};
+    char ext_pan_str[20];
+
+    esp_zb_get_extended_pan_id(ext_pan);
+    zigbee_ieee_to_str(ext_pan, ext_pan_str, sizeof(ext_pan_str));
 
     snprintf(buf, buf_len,
-             "{\"version\":\"1.0.0\","
-             "\"network\":{\"channel\":%u,\"pan_id\":\"0x%04X\"},"
-             "\"permit_join\":%s}",
-             ch, pan,
+             "{\"version\":\"%s\","
+             "\"network\":{\"channel\":%u,\"extended_pan_id\":\"%s\",\"pan_id\":%u},"
+             "\"permit_join\":%s,"
+             "\"restart_required\":false}",
+             BRIDGE_PUBLIC_VERSION,
+             ch,
+             ext_pan_str,
+             pan,
              button_handler_permit_join_active() ? "true" : "false");
+}
+
+static bool build_bridge_info_json(char *buf, size_t buf_len)
+{
+    uint8_t ch = esp_zb_get_current_channel();
+    uint16_t pan = esp_zb_get_pan_id();
+    esp_zb_ieee_addr_t ext_pan = {0};
+    esp_zb_ieee_addr_t coord_ieee = {0};
+    char ext_pan_str[20];
+    char coord_ieee_str[20];
+    char *p = buf;
+    char *end = buf + buf_len - 1;
+
+    *p = '\0';
+
+    esp_zb_get_extended_pan_id(ext_pan);
+    esp_zb_get_long_address(coord_ieee);
+    zigbee_ieee_to_str(ext_pan, ext_pan_str, sizeof(ext_pan_str));
+    zigbee_ieee_to_str(coord_ieee, coord_ieee_str, sizeof(coord_ieee_str));
+
+    json_append(&p, end, "{");
+    json_append(&p, end, "\"commit\":\"%s\",", BRIDGE_PUBLIC_COMMIT);
+
+    json_append(&p, end, "\"config\":{");
+    json_append(&p, end, "\"advanced\":{");
+    json_append(&p, end,
+                "\"cache_state\":true,"
+                "\"cache_state_persistent\":true,"
+                "\"cache_state_send_on_startup\":true,");
+    json_append(&p, end, "\"channel\":%u,", ch);
+    json_append(&p, end, "\"elapsed\":false,");
+    json_append(&p, end, "\"ext_pan_id\":");
+    append_ieee_array_json(&p, end, ext_pan);
+    json_append(&p, end, ",\"last_seen\":\"disable\",");
+    json_append(&p, end, "\"log_level\":\"%s\",", BRIDGE_LOG_LEVEL);
+    json_append(&p, end, "\"output\":\"json\",");
+    json_append(&p, end, "\"pan_id\":%u", pan);
+    json_append(&p, end, "},");
+
+    json_append(&p, end,
+                "\"device_options\":{},"
+                "\"frontend\":{\"enabled\":false},"
+                "\"groups\":{},"
+                "\"health\":{\"interval\":30,\"reset_on_check\":false},"
+                "\"homeassistant\":{\"enabled\":false},");
+
+    json_append(&p, end, "\"mqtt\":{");
+    json_append(&p, end, "\"base_topic\":\"%s\",", MQTT_BASE_TOPIC);
+    json_append(&p, end,
+                "\"include_device_information\":false,"
+                "\"keepalive\":60,"
+                "\"reject_unauthorized\":true,");
+    json_append(&p, end, "\"server\":\"%s\",", MQTT_BROKER_URI);
+    json_append(&p, end, "\"version\":4},");
+
+    json_append(&p, end, "\"serial\":{");
+    json_append(&p, end, "\"adapter\":\"zboss\",");
+    json_append(&p, end, "\"port\":\"%s\"},", CONFIG_IDF_TARGET);
+    json_append(&p, end, "\"version\":5");
+    json_append(&p, end, "},");
+
+    json_append(&p, end, "\"coordinator\":{");
+    json_append(&p, end, "\"ieee_address\":");
+    json_append_string(&p, end, coord_ieee_str);
+    json_append(&p, end, ",\"meta\":{},\"type\":\"ZBOSS\"},");
+
+    json_append(&p, end, "\"log_level\":\"%s\",", BRIDGE_LOG_LEVEL);
+    json_append(&p, end,
+                "\"mqtt\":{\"server\":\"%s\",\"version\":4},",
+                MQTT_BROKER_URI);
+    json_append(&p, end,
+                "\"network\":{\"channel\":%u,\"extended_pan_id\":",
+                ch);
+    json_append_string(&p, end, ext_pan_str);
+    json_append(&p, end, ",\"pan_id\":%u},", pan);
+    json_append(&p, end, "\"permit_join\":%s,",
+                button_handler_permit_join_active() ? "true" : "false");
+    json_append(&p, end, "\"restart_required\":false,");
+    json_append(&p, end, "\"version\":\"%s\"", BRIDGE_PUBLIC_VERSION);
+    json_append(&p, end, "}");
+
+    return !json_buffer_truncated(p, end);
 }
 
 /** Publish directly via MQTT client (for use in mqtt_bridge_on_connected). */
@@ -412,8 +524,13 @@ static void enqueue_pub(const char *topic, const char *payload,
 
 static void pub_bridge_info(bool direct)
 {
-    char info[512];
-    build_bridge_info_json(info, sizeof(info));
+    char info[MQTT_MAX_PAYLOAD_LEN];
+
+    if (!build_bridge_info_json(info, sizeof(info))) {
+        ZB_LOG("MQTT bridge: %s payload truncated, using fallback payload", B_INFO);
+        build_bridge_info_json_fallback(info, sizeof(info));
+    }
+
     if (direct) {
         burst_pub(B_INFO, info, 1, 1, pdMS_TO_TICKS(20));
     } else {

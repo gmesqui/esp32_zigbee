@@ -10,7 +10,11 @@ isProject: false
 ## Modelo general
 
 - Prefijo: todos los topics relativos se publican bajo `mqtt.base_topic`, cuyo valor por defecto es `esp32_zigbee`.
-- Suscripcion: al conectar, el cliente MQTT se suscribe a `esp32_zigbee/#`.
+- Suscripcion: al conectar, el cliente MQTT se suscribe solo a los topics de
+  entrada que consume:
+  - `esp32_zigbee/bridge/request/#`
+  - `esp32_zigbee/+/set/#`
+  - `esp32_zigbee/+/get/#`
 - Publicacion: el bridge publica su estado, eventos de red Zigbee, estados por entidad y un inventario retenido en `bridge/devices`.
 
 ## Topics que publica el bridge
@@ -33,16 +37,54 @@ isProject: false
 ### `bridge/info`
 
 - Topic: `esp32_zigbee/bridge/info`
+- Objetivo: formato parecido a `zigbee2mqtt/bridge/info`, pero solo con
+  campos y valores que este firmware conoce o fija de forma explicita.
 - Contenido actual:
-  - `version`
+  - `commit`
+  - `config.advanced`
+    - `cache_state`
+    - `cache_state_persistent`
+    - `cache_state_send_on_startup`
+    - `channel`
+    - `elapsed`
+    - `ext_pan_id`
+    - `last_seen`
+    - `log_level`
+    - `output`
+    - `pan_id`
+  - `config.device_options`
+  - `config.frontend.enabled`
+  - `config.groups`
+  - `config.health`
+  - `config.homeassistant.enabled`
+  - `config.mqtt`
+    - `base_topic`
+    - `include_device_information`
+    - `keepalive`
+    - `reject_unauthorized`
+    - `server`
+    - `version`
+  - `config.serial`
+    - `adapter`
+    - `port`
+  - `config.version`
+  - `coordinator.ieee_address`
+  - `coordinator.meta`
+  - `coordinator.type`
+  - `log_level`
+  - `mqtt.server`
+  - `mqtt.version`
   - `network.channel`
+  - `network.extended_pan_id`
   - `network.pan_id`
   - `permit_join`
+  - `restart_required`
+  - `version`
 
 Ejemplo:
 
 ```json
-{"version":"1.0.0","network":{"channel":15,"pan_id":"0x1234"},"permit_join":false}
+{"commit":"7419695","config":{"advanced":{"cache_state":true,"cache_state_persistent":true,"cache_state_send_on_startup":true,"channel":15,"elapsed":false,"ext_pan_id":[188,217,235,255,254,19,207,208],"last_seen":"disable","log_level":"info","output":"json","pan_id":4660},"device_options":{},"frontend":{"enabled":false},"groups":{},"health":{"interval":30,"reset_on_check":false},"homeassistant":{"enabled":false},"mqtt":{"base_topic":"esp32_zigbee","include_device_information":false,"keepalive":60,"reject_unauthorized":true,"server":"mqtt://orangepipcplus.local","version":4},"serial":{"adapter":"zboss","port":"esp32c5"},"version":5},"coordinator":{"ieee_address":"0xd0cf13feffebd9bc","meta":{},"type":"ZBOSS"},"log_level":"info","mqtt":{"server":"mqtt://orangepipcplus.local","version":4},"network":{"channel":15,"extended_pan_id":"0xd0cf13feffebd9bc","pan_id":4660},"permit_join":false,"restart_required":false,"version":"2.9.1"}
 ```
 
 ### `bridge/event`

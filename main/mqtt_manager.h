@@ -13,8 +13,9 @@
 // ---------------------------------------------------------------------------
 
 #define MQTT_BASE_TOPIC       "esp32_zigbee"
+#define MQTT_BROKER_URI       "mqtt://orangepipcplus.local"
 #define MQTT_MAX_TOPIC_LEN    128
-#define MQTT_MAX_PAYLOAD_LEN  768
+#define MQTT_MAX_PAYLOAD_LEN  1024
 #define MQTT_QUEUE_LEN        16
 
 typedef struct {

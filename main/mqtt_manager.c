@@ -14,7 +14,6 @@
 // ---------------------------------------------------------------------------
 // Configuration
 // ---------------------------------------------------------------------------
-#define MQTT_BROKER_URI     "mqtt://orangepipcplus.local"
 #define MQTT_CLIENT_ID      "esp32_zigbee"
 #define MQTT_LWT_TOPIC      MQTT_BASE_TOPIC "/bridge/state"
 #define MQTT_LWT_PAYLOAD    "{\"state\":\"offline\"}"
@@ -46,6 +45,17 @@ static esp_mqtt_client_handle_t   s_client;
 static TaskHandle_t               s_task_handle;
 static volatile bool              s_connected = false;
 
+static void subscribe_command_topics(esp_mqtt_client_handle_t client)
+{
+    if (!client) {
+        return;
+    }
+
+    esp_mqtt_client_subscribe(client, MQTT_BASE_TOPIC "/bridge/request/#", 1);
+    esp_mqtt_client_subscribe(client, MQTT_BASE_TOPIC "/+/set/#", 1);
+    esp_mqtt_client_subscribe(client, MQTT_BASE_TOPIC "/+/get/#", 1);
+}
+
 // ---------------------------------------------------------------------------
 // MQTT event handler (runs in esp_mqtt internal task)
 // ---------------------------------------------------------------------------
@@ -62,7 +72,7 @@ static void mqtt_event_handler(void *handler_args, esp_event_base_t base,
         case MQTT_EVENT_CONNECTED:
             ZB_LOG("MQTT: connected to broker");
             s_connected = true;
-            esp_mqtt_client_subscribe(s_client, MQTT_BASE_TOPIC "/#", 1);
+            subscribe_command_topics(s_client);
             xTaskNotify(s_task_handle, NOTIFY_CONNECTED, eSetBits);
             break;
 
