@@ -74,7 +74,9 @@ El payload actual incluye:
 
 - Entrada `Coordinator`.
 - Un objeto por dispositivo entrevistado.
-- `definition`, `exposes` y `options` cuando el dispositivo coincide con una definicion conocida de z2m que tengamos implementada.
+- `definition` para cualquier dispositivo entrevistado con identidad o endpoints conocidos.
+- `exposes` inferidos dinamicamente a partir de los endpoints y clusters descubiertos durante la entrevista.
+- `options` enriquecidas con metadata tipo z2m cuando el modelo coincide con una definicion conocida que tengamos implementada.
 - Campos base compatibles con z2m:
   - `disabled`
   - `endpoints`
@@ -170,7 +172,8 @@ Ejemplo resumido:
 Limitaciones actuales frente a zigbee2mqtt:
 
 - El `Coordinator` usa endpoints minimos, no una descripcion completa del coordinador real.
-- `definition/exposes/options` solo se publica para el subconjunto de modelos que ya tenemos alineados con z2m.
+- El enriquecimiento fino de `definition.vendor`, `description` y `options` sigue siendo mas completo para el subconjunto de modelos que ya tenemos alineados con z2m.
+- Los `exposes` dinamicos se basan en los clusters realmente entrevistados; no intentan adivinar capacidades no observadas en la red.
 - Si `bridge/devices` no cabe en el buffer fijo actual, el bridge no publica ese retained en vez de enviar JSON truncado.
 - No publicamos aun:
   - `date_code`
