@@ -522,7 +522,7 @@ void esp_zb_app_signal_handler(esp_zb_app_signal_t *signal_struct)
                     }
                 }
 
-                // Notify event consumers (e.g. MQTT bridge)
+                // Notify registered event consumers
                 zb_event_t evt = {
                     .type   = ZB_EVT_DEVICE_JOINED,
                     .ieee   = ieee,

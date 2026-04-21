@@ -13,8 +13,7 @@
 #include "zb_events.h"
 #include "eth_driver.h"
 #include "time_sync.h"
-#include "mqtt_manager.h"
-#include "mqtt_bridge.h"
+#include "client_events.h"
 
 // ---------------------------------------------------------------------------
 // app_main — called by ESP-IDF after system init
@@ -44,16 +43,13 @@ void app_main(void)
     // 4. Time sync (starts SNTP after ETH_IP_READY_BIT)
     time_sync_init(eth_eg);
 
-    // 5. MQTT manager (starts mqtt_task; task waits for ETH_IP_READY_BIT)
-    mqtt_manager_init(eth_eg);
+    // 5. Client event callback placeholder for the next transport layer
+    client_events_init();
 
-    // 6. MQTT bridge (registers as zb_events consumer)
-    mqtt_bridge_init();
-
-    // 7. Device manager (must be before NVS load and Zigbee init)
+    // 6. Device manager (must be before NVS load and Zigbee init)
     dm_init();
 
-    // 3. Load persisted device table from NVS
+    // 7. Load persisted device table from NVS
     //    Devices are restored with state=INTERVIEWED, online=false.
     //    They become online again when we receive traffic from them.
     if (nvs_cache_load()) {
@@ -62,22 +58,22 @@ void app_main(void)
         ZB_LOG("No device cache — starting fresh");
     }
 
-    // 4. ZCL handler (attribute cache, pending buffer)
+    // 8. ZCL handler (attribute cache, pending buffer)
     zcl_handler_init();
 
-    // 5. Interview subsystem
+    // 9. Interview subsystem
     di_init();
 
-    // 6. LED driver — starts the led_task
+    // 10. LED driver — starts the led_task
     led_driver_init();
 
-    // 7. Button handler — starts the btn_task
+    // 11. Button handler — starts the btn_task
     button_handler_init();
 
-    // 8. Serial command handler — starts the serial_cmd_task
+    // 12. Serial command handler — starts the serial_cmd_task
     serial_cmd_init();
 
-    // 9. Zigbee core — starts the zigbee_main task
+    // 13. Zigbee core — starts the zigbee_main task
     //    The task initialises the stack and enters the main loop.
     //    All further operation is event-driven from there.
     zigbee_core_init();

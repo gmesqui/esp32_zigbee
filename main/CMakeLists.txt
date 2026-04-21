@@ -8,15 +8,13 @@ idf_component_register(
         "nvs_cache.c"
         "zcl_handler.c"
         "report_config.c"
-        "device_definition.c"
         "device_interview.c"
+        "client_actions.c"
+        "client_events.c"
         "serial_cmd.c"
         "zigbee_core.c"
         "zb_events.c"
         "eth_driver.c"
-        "mqtt_manager.c"
-        "mqtt_bridge.c"
-        "mqtt_commands.c"
         "time_sync.c"
     INCLUDE_DIRS "."
     REQUIRES
@@ -30,6 +28,4 @@ idf_component_register(
         esp_netif
         esp_event
         lwip
-        mqtt
-        json
 )

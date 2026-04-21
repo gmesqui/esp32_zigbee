@@ -6,9 +6,6 @@
 #include "utils.h"
 #include <string.h>
 #include <stdio.h>
-#include <stdarg.h>
-#include <math.h>
-#include <inttypes.h>
 #include "freertos/FreeRTOS.h"
 #include "freertos/semphr.h"
 #include "zb_osif_platform.h"
@@ -570,7 +567,7 @@ static bool process_attribute(device_record_t *dev, uint8_t ep,
         format_attr_value(cluster, attr_id, attr_type, val, desc, sizeof(desc));
         ZB_LOG("STATE %s/%u %s", dm_display_name(dev), ep, desc);
 
-        // Emit event for consumers (e.g. MQTT bridge) — non-blocking
+        // Emit event for registered consumers - non-blocking
         if (emit_event) {
             emit_attr_changed_event(dev, ep, cluster, attr_id, attr_type, val, sz);
         }
@@ -879,176 +876,10 @@ void zcl_clear_unsupported_attrs(uint64_t ieee)
     unsupported_clear_device_locked(ieee);
     xSemaphoreGive(g_attr_mutex);
 }
-
 void zcl_forget_device(uint64_t ieee)
 {
     xSemaphoreTake(g_attr_mutex, portMAX_DELAY);
     attr_cache_clear_device_locked(ieee);
     unsupported_clear_device_locked(ieee);
     xSemaphoreGive(g_attr_mutex);
-}
-
-// ---------------------------------------------------------------------------
-// zcl_fill_state_json — public, thread-safe (acquires g_attr_mutex)
-// ---------------------------------------------------------------------------
-
-// Helper: append a comma-separated JSON field
-static int append_field(char *buf, size_t buf_len, bool *first,
-                         const char *key, const char *fmt, ...)
-                         __attribute__((format(printf, 5, 6)));
-
-static int append_field(char *buf, size_t buf_len, bool *first,
-                         const char *key, const char *fmt, ...)
-{
-    if (buf_len < 4) return 0;
-
-    char val[64];
-    va_list ap;
-    va_start(ap, fmt);
-    vsnprintf(val, sizeof(val), fmt, ap);
-    va_end(ap);
-
-    int n = snprintf(buf, buf_len, "%s\"%s\":%s",
-                     *first ? "" : ",", key, val);
-    *first = false;
-    return (n > 0 && (size_t)n < buf_len) ? n : 0;
-}
-
-int zcl_fill_state_json(uint64_t ieee, char *buf, size_t buf_len,
-                         bool *first_field)
-{
-    if (!buf || buf_len < 4 || !first_field) return 0;
-
-    int count = 0;
-    char *p   = buf;
-
-    xSemaphoreTake(g_attr_mutex, portMAX_DELAY);
-
-    for (int i = 0; i < MAX_ATTR_CACHE; i++) {
-        attr_cache_entry_t *e = &g_attr_cache[i];
-        if (!e->in_use || e->ieee_addr != ieee) continue;
-
-        const uint8_t *v  = e->value;
-        uint8_t t         = e->attr_type;
-        uint16_t cl       = e->cluster_id;
-        uint16_t at       = e->attr_id;
-        size_t rem        = buf_len - (size_t)(p - buf);
-        int n             = 0;
-
-        // Read helpers (same as existing code)
-        uint32_t uv = 0;
-        for (int b = 0; b < zcl_type_size(t) && b < 4; b++)
-            uv |= ((uint32_t)v[b] << (8 * b));
-        int32_t sv = (int32_t)uv;
-        if (zcl_type_size(t) == 2) {
-            int shift = 16; sv = (sv << shift) >> shift;
-        } else if (zcl_type_size(t) == 1) {
-            int shift = 24; sv = (sv << shift) >> shift;
-        }
-
-        switch (cl) {
-            case 0x0006:   // On/Off
-                // Export only the standard OnOff attribute as `state`.
-                // Some devices also report manufacturer-specific attrs in the
-                // same cluster (e.g. 0x4001/0x8001/0x8002), which would
-                // otherwise duplicate the JSON key.
-                if (at == 0x0000) {
-                    n = append_field(p, rem, first_field,
-                                     "state", "\"%s\"", uv ? "ON" : "OFF");
-                }
-                break;
-
-            case 0x0008:   // Level Control
-                n = append_field(p, rem, first_field,
-                                 "brightness", "%"PRIu32, uv & 0xFF);
-                break;
-
-            case 0x0300:   // Color Control
-                if (at == 0x0000)
-                    n = append_field(p, rem, first_field, "color_hue",
-                                     "%"PRIu32, uv & 0xFF);
-                else if (at == 0x0001)
-                    n = append_field(p, rem, first_field, "color_saturation",
-                                     "%"PRIu32, uv & 0xFF);
-                else if (at == 0x0007)
-                    n = append_field(p, rem, first_field, "color_temp",
-                                     "%"PRIu32, uv & 0xFFFF);
-                break;
-
-            case 0x0402:   // Temperature (int16 / 100 → °C)
-                n = append_field(p, rem, first_field, "temperature",
-                                 "%.2f", (double)sv / 100.0);
-                break;
-
-            case 0x0405:   // Humidity (uint16 / 100 → %)
-                n = append_field(p, rem, first_field, "humidity",
-                                 "%.2f", (double)(uv & 0xFFFF) / 100.0);
-                break;
-
-            case 0x0403:   // Pressure (int16 / 10 → hPa)
-                n = append_field(p, rem, first_field, "pressure",
-                                 "%.1f", (double)sv / 10.0);
-                break;
-
-            case 0x0400:   // Illuminance (logarithmic)
-            {
-                uint16_t raw = (uint16_t)(uv & 0xFFFF);
-                double lux = (raw == 0) ? 0.0
-                                        : pow(10.0, (raw - 1) / 10000.0);
-                n = append_field(p, rem, first_field, "illuminance",
-                                 "%.1f", lux);
-                break;
-            }
-
-            case 0x0406:   // Occupancy
-                n = append_field(p, rem, first_field, "occupancy",
-                                 "%"PRIu32, uv & 0x01);
-                break;
-
-            case 0x0001:   // Power Config
-                if (at == 0x0020) {
-                    n = append_field(p, rem, first_field, "voltage",
-                                     "%"PRIu32, (uv & 0xFF) * 100u);
-                } else if (at == 0x0021 && (uv & 0xFF) != 0xFF) {
-                    n = append_field(p, rem, first_field, "battery",
-                                     "%"PRIu32, (uv & 0xFF) / 2u);
-                }
-                break;
-
-            case 0x0500:   // IAS Zone (attr 0x0002 = zone status bitmap16)
-                if (at == 0x0002) {
-                    uint16_t st = (uint16_t)(uv & 0xFFFF);
-                    // contact: true = no alarm (bit 0 clear)
-                    int nc = append_field(p, rem, first_field, "contact",
-                                          "%s", (st & 0x01) ? "false" : "true");
-                    if (nc > 0) { p += nc; rem -= (size_t)nc; count++; n = 0; }
-                    nc = append_field(p, rem, first_field, "tamper",
-                                      "%s", (st & 0x04) ? "true" : "false");
-                    if (nc > 0) { p += nc; rem -= (size_t)nc; count++; n = 0; }
-                    nc = append_field(p, rem, first_field, "battery_low",
-                                      "%s", (st & 0x08) ? "true" : "false");
-                    if (nc > 0) { p += nc; rem -= (size_t)nc; count++; }
-                    n = 0;  // already incremented count above
-                }
-                break;
-
-            case 0x0B04:   // Electrical Measurement
-                if (at == 0x050B) {  // Active Power (int16 / 10 → W)
-                    n = append_field(p, rem, first_field, "power",
-                                     "%.1f", (double)sv / 10.0);
-                }
-                break;
-
-            default:
-                break;
-        }
-
-        if (n > 0) {
-            p     += n;
-            count++;
-        }
-    }
-
-    xSemaphoreGive(g_attr_mutex);
-    return count;
 }

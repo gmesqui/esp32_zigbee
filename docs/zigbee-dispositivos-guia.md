@@ -6,7 +6,7 @@ Este documento describe el manejo de dispositivos Zigbee tal y como esta impleme
 
 Quedan fuera de alcance:
 
-- La capa MQTT como protocolo y modelo de topics
+- La capa de transporte hacia clientes externos
 - Ethernet, SNTP y conectividad IP
 - La presentacion hacia Home Assistant o clientes externos
 
@@ -765,7 +765,7 @@ Ese destino puede ser:
 - un grupo Zigbee
 - otro dispositivo concreto por IEEE + endpoint
 
-Un binding no es un atributo ZCL ni una regla de MQTT. Es informacion propia del nodo Zigbee, almacenada en su binding table.
+Un binding no es un atributo ZCL ni una regla de transporte externo. Es informacion propia del nodo Zigbee, almacenada en su binding table.
 
 ### Que informacion contiene cada binding
 
@@ -979,7 +979,7 @@ El proyecto soporta ambas cosas, pero la ruta mas importante en tiempo real es l
 
 ## Envio de ordenes Zigbee
 
-Aunque hoy la entrada de ordenes vive en `mqtt_commands.c`, la parte Zigbee actual se reduce a tres primitivas:
+La entrada de ordenes hacia Zigbee vive en `client_actions.c` y se reduce a tres primitivas:
 
 - `esp_zb_zcl_on_off_cmd_req()`
 - `esp_zb_zcl_level_move_to_level_with_onoff_cmd_req()`
@@ -999,7 +999,7 @@ Ejemplos:
 
 ### Lo que esta fuera de este documento
 
-No se detalla aqui la parse de payloads ni la logica MQTT de entrada. Lo relevante desde el punto de vista Zigbee es que el proyecto ya tiene un camino funcional para:
+No se detalla aqui la parse de mensajes ni la logica del futuro transporte de entrada. Lo relevante desde el punto de vista Zigbee es que el proyecto ya tiene un camino funcional para:
 
 - enviar ordenes On, Off y Toggle
 - enviar MoveToLevel con on/off

@@ -18,7 +18,6 @@
  * Initialise the default event loop, esp_netif, SPI2 bus, W5500 MAC/PHY
  * and register IP event handlers.
  *
- * Must be called before mqtt_manager_init().
  * Returns the event group; ETH_IP_READY_BIT is set when DHCP completes.
  */
 EventGroupHandle_t eth_driver_init(void);

@@ -87,21 +87,3 @@ void zcl_clear_unsupported_attrs(uint64_t ieee);
 
 /** Remove all cached ZCL knowledge for a device that has been deleted. */
 void zcl_forget_device(uint64_t ieee);
-
-// ---------------------------------------------------------------------------
-// State JSON export (used by MQTT bridge for reconnect burst)
-// ---------------------------------------------------------------------------
-
-/**
- * Iterate the attribute cache for the given IEEE address and append
- * JSON key:value pairs into buf.
- *
- * buf must already contain some partial JSON content (opened elsewhere).
- * *first_field: if true the next appended field will NOT be preceded by a
- *               comma; it is set to false after the first field is written.
- *
- * Thread-safe: acquires the internal attr-cache mutex.
- * Returns number of fields appended.
- */
-int zcl_fill_state_json(uint64_t ieee, char *buf, size_t buf_len,
-                         bool *first_field);

@@ -4,7 +4,6 @@
 
 // ---------------------------------------------------------------------------
 // Zigbee event bus — neutral layer between Zigbee stack code and consumers
-// (e.g. MQTT bridge).
 //
 // Zigbee task code calls zb_events_emit() to notify all registered handlers.
 // Handlers are called synchronously in the same task context, so they MUST
