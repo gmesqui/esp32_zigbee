@@ -28,6 +28,22 @@ static void dm_emit_availability(const device_record_t *dev)
     zb_events_emit(&evt);
 }
 
+static void dm_emit_device_updated(const device_record_t *dev)
+{
+    if (!dev) return;
+
+    zb_event_t evt = {
+        .type = ZB_EVT_DEVICE_UPDATED,
+        .ieee = dev->ieee_addr,
+        .online = dev->online,
+        .lqi = dev->last_lqi,
+        .has_lqi = dev->radio_metrics_valid,
+    };
+    strncpy(evt.friendly_name, dev->friendly_name, ZB_EVT_NAME_LEN - 1);
+    evt.friendly_name[ZB_EVT_NAME_LEN - 1] = '\0';
+    zb_events_emit(&evt);
+}
+
 // ---------------------------------------------------------------------------
 // Init
 // ---------------------------------------------------------------------------
@@ -190,11 +206,20 @@ bool dm_set_online(device_record_t *dev, bool online)
 void dm_set_friendly_name(device_record_t *dev, const char *name)
 {
     if (!dev || !name) return;
-    strncpy(dev->friendly_name, name, FRIENDLY_NAME_LEN - 1);
+
+    char next_name[FRIENDLY_NAME_LEN];
+    strncpy(next_name, name, sizeof(next_name) - 1);
+    next_name[sizeof(next_name) - 1] = '\0';
+    if (strcmp(dev->friendly_name, next_name) == 0) {
+        return;
+    }
+
+    strncpy(dev->friendly_name, next_name, FRIENDLY_NAME_LEN - 1);
     dev->friendly_name[FRIENDLY_NAME_LEN - 1] = '\0';
     dev->dirty = true;
     ZB_LOG("DEVICE %s friendly_name set to \"%s\"",
            dm_display_name(dev), dev->friendly_name);
+    dm_emit_device_updated(dev);
 }
 
 int dm_index_of(const device_record_t *dev)

@@ -13,6 +13,7 @@
 typedef enum {
     ZB_EVT_DEVICE_JOINED,     // device announced / rejoined
     ZB_EVT_DEVICE_LEAVE,      // device left the network
+    ZB_EVT_DEVICE_UPDATED,    // local model metadata changed
     ZB_EVT_INTERVIEW,         // interview lifecycle (started/successful/failed)
     ZB_EVT_ATTR_CHANGED,      // ZCL attribute value changed
     ZB_EVT_AVAILABILITY,      // device online/offline state changed

@@ -14,6 +14,7 @@
 #include "eth_driver.h"
 #include "time_sync.h"
 #include "client_events.h"
+#include "ws_transport.h"
 
 // ---------------------------------------------------------------------------
 // app_main — called by ESP-IDF after system init
@@ -43,13 +44,10 @@ void app_main(void)
     // 4. Time sync (starts SNTP after ETH_IP_READY_BIT)
     time_sync_init(eth_eg);
 
-    // 5. Client event callback placeholder for the next transport layer
-    client_events_init();
-
-    // 6. Device manager (must be before NVS load and Zigbee init)
+    // 5. Device manager (must be before NVS load and Zigbee init)
     dm_init();
 
-    // 7. Load persisted device table from NVS
+    // 6. Load persisted device table from NVS
     //    Devices are restored with state=INTERVIEWED, online=false.
     //    They become online again when we receive traffic from them.
     if (nvs_cache_load()) {
@@ -58,8 +56,12 @@ void app_main(void)
         ZB_LOG("No device cache — starting fresh");
     }
 
-    // 8. ZCL handler (attribute cache, pending buffer)
+    // 7. ZCL handler (attribute cache, pending buffer)
     zcl_handler_init();
+
+    // 8. WebSocket transport and neutral client event bridge
+    ws_transport_init(eth_eg);
+    client_events_init();
 
     // 9. Interview subsystem
     di_init();

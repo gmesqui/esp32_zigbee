@@ -11,6 +11,10 @@ idf_component_register(
         "device_interview.c"
         "client_actions.c"
         "client_events.c"
+        "ws_client_session.c"
+        "ws_model.c"
+        "ws_protocol.c"
+        "ws_transport.c"
         "serial_cmd.c"
         "zigbee_core.c"
         "zb_events.c"
@@ -27,5 +31,7 @@ idf_component_register(
         esp_eth
         esp_netif
         esp_event
+        esp_http_server
         lwip
+        json
 )
