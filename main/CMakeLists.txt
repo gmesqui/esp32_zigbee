@@ -14,6 +14,7 @@ idf_component_register(
         "ws_client_session.c"
         "ws_model.c"
         "ws_protocol.c"
+        "ws_protocol_selftest.c"
         "ws_transport.c"
         "serial_cmd.c"
         "zigbee_core.c"

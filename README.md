@@ -13,6 +13,24 @@ Coordinador Zigbee completo para `ESP32-C5-KITC-A V1.2` con `ESP-IDF` y `ESP Zig
 
 ---
 
+## Transporte WebSocket
+
+El transporte operativo para clientes externos es WebSocket sobre ESP-IDF:
+
+- URL: `ws://<gateway>:8080/ws`
+- Modulo servidor: `ws_transport.c/h`
+- Protocolo y parsing: `ws_protocol.c/h`
+- Adaptacion del modelo interno: `ws_model.c/h`
+- Sesion activa: `ws_client_session.c/h`
+- Puente de productores Zigbee/modelo: `client_events.c/h`
+- Self-test por UART: tecla `w`
+
+Al conectarse un cliente, el ESP32 inicia el stream autonomo sin esperar un
+mensaje entrante: envia `hello_ack`, inventario fragmentado, estado inicial y
+despues queda en modo stream para eventos futuros.
+
+---
+
 ## Arquitectura
 
 ```
@@ -188,6 +206,7 @@ app_main()
 | `j` | Toggle permit-join (abre 180 s o cierra) |
 | `r` | Re-entrevistar dispositivo (pide IEEE, resetea estado a NEW) |
 | `e` | Borrar cache NVS (pide confirmacion "YES") |
+| `w` | Ejecutar self-test del protocolo WebSocket |
 | `?` | Ayuda: imprime mapa de teclas |
 
 ---

@@ -5,6 +5,7 @@
 #include "button_handler.h"
 #include "report_config.h"
 #include "utils.h"
+#include "ws_protocol_selftest.h"
 
 #include <stdio.h>
 #include <stdlib.h>
@@ -322,6 +323,7 @@ static void cmd_help(void)
         "  4 - Heap statistics\n"
         "  5 - Interview queue status\n"
         "  g - Read reporting config (interactive)\n"
+        "  w - WebSocket protocol self-test\n"
         "  n - Set friendly name\n"
         "  j - Toggle permit join\n"
         "  r - Re-interview device\n"
@@ -355,6 +357,9 @@ static void serial_cmd_task(void *arg)
                 break;
             case 'g':
                 cmd_read_reporting_config();
+                break;
+            case 'w':
+                ws_protocol_selftest_run(true);
                 break;
             case 'n':
                 cmd_set_friendly_name();
