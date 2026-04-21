@@ -19,8 +19,8 @@
 // ---------------------------------------------------------------------------
 
 /** Start configure-reporting for all relevant clusters on a device.
- *  Called by device_interview when STEP_CONFIGURE_REPORTING is reached. */
-void rc_configure_device(device_record_t *dev);
+ *  Returns the number of Configure Reporting commands sent. */
+size_t rc_configure_device(device_record_t *dev);
 
 /** Schedule configure-reporting from a non-Zigbee task. */
 void rc_configure_device_async(device_record_t *dev);
@@ -36,12 +36,21 @@ typedef struct {
 /** Return configured reportings that apply to the given endpoint.
  *  If out == NULL, returns the count only. */
 size_t rc_get_configured_reportings_for_endpoint(const endpoint_record_t *ep,
+                                                 bool is_sleepy,
                                                  rc_configured_reporting_t *out,
                                                  size_t out_len);
 
 /** Called by zigbee_core when a Configure Reporting Response arrives.
- *  Updates dev->reporting_configured if all records succeeded. */
+ *  Updates the runtime reporting-validation session for the source device. */
 void rc_on_config_resp(const esp_zb_zcl_cmd_config_report_resp_message_t *msg);
+
+/** Called by zigbee_core when a Read Reporting Configuration Response arrives. */
+void rc_on_read_report_cfg_resp(const esp_zb_zcl_cmd_read_report_config_resp_message_t *msg);
+
+/** Schedule a Read Reporting Configuration request from a non-Zigbee task.
+ *  Returns false if the diagnostic queue is full or the device is invalid. */
+bool rc_read_reporting_config_async(device_record_t *dev, uint8_t endpoint,
+                                    uint16_t cluster_id, uint16_t attr_id);
 
 /** Write the coordinator's own IEEE address to a device's IAS_CIE_Address
  *  attribute (0x0010 on cluster 0x0500).  Required before enrollment. */

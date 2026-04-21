@@ -22,7 +22,7 @@ typedef enum {
     ISTATE_READ_BASIC,
     ISTATE_READ_POWER_CFG,
     ISTATE_CONFIG_REPORT,
-    ISTATE_DONE,
+    ISTATE_WAIT_REPORT_CONFIG,
 } istate_t;
 
 typedef struct {
@@ -38,6 +38,7 @@ static interview_ctx_t g_ictx;
 
 // Simple FIFO queue of device indices awaiting interview
 #define IQUEUE_SIZE  8
+#define REPORT_CFG_RESPONSE_TIMEOUT_MS  8000u
 static uint8_t g_iqueue[IQUEUE_SIZE];
 static uint8_t g_iq_head = 0;
 static uint8_t g_iq_tail = 0;
@@ -119,6 +120,63 @@ static device_record_t *ctx_get_device(void *user_ctx, uint8_t *dev_idx_out)
 static void interview_step(uint8_t dev_idx);    // dispatcher
 static void alarm_start_step(uint8_t dev_idx);  // fired by scheduler
 static void request_binding_table(device_record_t *dev, uint8_t start_index);
+static void interview_fail(uint8_t dev_idx);
+static void interview_done(uint8_t dev_idx);
+
+static void format_attr_list(const uint16_t *attrs, uint8_t attr_count,
+                             char *out, size_t out_len)
+{
+    size_t used = 0;
+
+    if (!out || out_len == 0) return;
+    out[0] = '\0';
+    if (!attrs || attr_count == 0) return;
+
+    for (uint8_t i = 0; i < attr_count; i++) {
+        int n = snprintf(out + used, out_len - used, "%s0x%04X",
+                         i ? "," : "", attrs[i]);
+        if (n < 0 || (size_t)n >= out_len - used) {
+            break;
+        }
+        used += (size_t)n;
+    }
+}
+
+static void interview_finish_reporting_validation(uint8_t dev_idx, bool timed_out)
+{
+    device_record_t *dev = dm_get_by_index(dev_idx);
+    if (!dev || !dev->in_use || dev->ieee_addr != g_ictx.ieee_addr) {
+        g_ictx.ieee_addr = 0;
+        g_ictx.state = ISTATE_IDLE;
+        g_ictx.active = false;
+        return;
+    }
+
+    if (timed_out && dev->report_cfg_in_progress) {
+        dev->report_cfg_in_progress = false;
+        dev->reporting_configured = false;
+        dev->dirty = true;
+    }
+
+    if (!dev->report_cfg_in_progress &&
+        dev->report_cfg_received == dev->report_cfg_expected &&
+        dev->report_cfg_failed == 0 &&
+        dev->reporting_configured) {
+        ZB_LOG("INTERVIEW_FINAL %s SUCCESS reporting validated "
+               "(responses=%u/%u failed=%u timeout=no)",
+               dm_display_name(dev), dev->report_cfg_received,
+               dev->report_cfg_expected, dev->report_cfg_failed);
+        interview_done(dev_idx);
+        return;
+    }
+
+    ZB_LOG("INTERVIEW_FINAL %s FAILED reporting validation "
+           "(responses=%u/%u failed=%u timeout=%s)",
+           dm_display_name(dev), dev->report_cfg_received,
+           dev->report_cfg_expected, dev->report_cfg_failed,
+           timed_out ? "yes" : "no");
+    interview_fail(dev_idx);
+}
 
 #define BINDING_DST_ADDR_MODE_GROUP   0x01u
 #define BINDING_DST_ADDR_MODE_IEEE    0x03u
@@ -130,6 +188,7 @@ static void request_binding_table(device_record_t *dev, uint8_t start_index);
 static void send_node_desc(uint16_t nwk_addr, uint8_t dev_idx)
 {
     esp_zb_zdo_node_desc_req_param_t p = { .dst_nwk_addr = nwk_addr };
+    ZB_LOG("TX RAW dst=0x%04X zdo=NODE_DESC_REQ", nwk_addr);
     esp_zb_zdo_node_desc_req(&p, di_on_node_desc_resp,
                               make_dev_ctx(dev_idx));
 }
@@ -137,6 +196,7 @@ static void send_node_desc(uint16_t nwk_addr, uint8_t dev_idx)
 static void send_power_desc(uint16_t nwk_addr, uint8_t dev_idx)
 {
     esp_zb_zdo_power_desc_req_param_t p = { .dst_nwk_addr = nwk_addr };
+    ZB_LOG("TX RAW dst=0x%04X zdo=POWER_DESC_REQ", nwk_addr);
     esp_zb_zdo_power_desc_req(&p, di_on_power_desc_resp,
                                make_dev_ctx(dev_idx));
 }
@@ -144,6 +204,7 @@ static void send_power_desc(uint16_t nwk_addr, uint8_t dev_idx)
 static void send_active_ep(uint16_t nwk_addr, uint8_t dev_idx)
 {
     esp_zb_zdo_active_ep_req_param_t p = { .addr_of_interest = nwk_addr };
+    ZB_LOG("TX RAW dst=0x%04X zdo=ACTIVE_EP_REQ", nwk_addr);
     esp_zb_zdo_active_ep_req(&p, di_on_active_ep_resp,
                               make_dev_ctx(dev_idx));
 }
@@ -154,6 +215,7 @@ static void send_simple_desc(uint16_t nwk_addr, uint8_t ep_id, uint8_t dev_idx)
         .addr_of_interest = nwk_addr,
         .endpoint         = ep_id,
     };
+    ZB_LOG("TX RAW dst=0x%04X ep=%u zdo=SIMPLE_DESC_REQ", nwk_addr, ep_id);
     esp_zb_zdo_simple_desc_req(&p, di_on_simple_desc_resp,
                                 make_dev_ctx(dev_idx));
 }
@@ -165,6 +227,8 @@ static void send_binding_table_req(uint16_t nwk_addr, uint8_t start_index,
         .start_index = start_index,
         .dst_addr = nwk_addr,
     };
+    ZB_LOG("TX RAW dst=0x%04X zdo=MGMT_BIND_REQ start_index=%u",
+           nwk_addr, start_index);
     esp_zb_zdo_binding_table_req(&p, di_on_binding_table_resp,
                                  make_dev_ctx(dev_idx));
 }
@@ -172,6 +236,7 @@ static void send_binding_table_req(uint16_t nwk_addr, uint8_t start_index,
 static void send_read_basic(uint16_t nwk_addr, uint8_t ep_id)
 {
     static uint16_t attrs[] = { 0x0004, 0x0005, 0x0007 }; // mfr, model, power_src
+    char attr_buf[48];
     esp_zb_zcl_read_attr_cmd_t cmd = {
         .zcl_basic_cmd = {
             .src_endpoint          = COORD_ENDPOINT,
@@ -183,12 +248,16 @@ static void send_read_basic(uint16_t nwk_addr, uint8_t ep_id)
         .attr_number  = 3,
         .attr_field   = attrs,
     };
+    format_attr_list(attrs, 3, attr_buf, sizeof(attr_buf));
+    ZB_LOG("TX RAW dst=0x%04X ep=%u cluster=%s read_attrs=[%s]",
+           nwk_addr, ep_id, utils_cluster_name(0x0000), attr_buf);
     esp_zb_zcl_read_attr_cmd_req(&cmd);
 }
 
 static void send_read_power_cfg(uint16_t nwk_addr, uint8_t ep_id)
 {
     static uint16_t attrs[] = { 0x0020, 0x0021 }; // battery_voltage, battery_pct
+    char attr_buf[32];
     esp_zb_zcl_read_attr_cmd_t cmd = {
         .zcl_basic_cmd = {
             .src_endpoint          = COORD_ENDPOINT,
@@ -200,6 +269,9 @@ static void send_read_power_cfg(uint16_t nwk_addr, uint8_t ep_id)
         .attr_number  = 2,
         .attr_field   = attrs,
     };
+    format_attr_list(attrs, 2, attr_buf, sizeof(attr_buf));
+    ZB_LOG("TX RAW dst=0x%04X ep=%u cluster=%s read_attrs=[%s]",
+           nwk_addr, ep_id, utils_cluster_name(0x0001), attr_buf);
     esp_zb_zcl_read_attr_cmd_req(&cmd);
 }
 
@@ -503,7 +575,18 @@ static void interview_step(uint8_t dev_idx)
             dev->state = DEV_STATE_INTERVIEWED;
             ZB_LOG("INTERVIEW %s STEP_CONFIG_REPORT", dm_display_name(dev));
             rc_configure_device(dev);
-            interview_done(dev_idx);
+            g_ictx.state = ISTATE_WAIT_REPORT_CONFIG;
+            if (dev->report_cfg_expected == 0) {
+                interview_finish_reporting_validation(dev_idx, false);
+            } else {
+                esp_zb_scheduler_alarm(alarm_start_step, dev_idx,
+                                       REPORT_CFG_RESPONSE_TIMEOUT_MS);
+            }
+            break;
+
+        case ISTATE_WAIT_REPORT_CONFIG:
+            interview_finish_reporting_validation(dev_idx,
+                                                  dev->report_cfg_in_progress);
             break;
 
         default:
@@ -578,6 +661,23 @@ void di_enqueue(device_record_t *dev)
             ZB_LOG("INTERVIEW queue full, dropping %s", dm_display_name(dev));
         }
     }
+}
+
+void di_on_reporting_config_response(device_record_t *dev)
+{
+    int idx;
+
+    if (!dev || !g_ictx.active || g_ictx.state != ISTATE_WAIT_REPORT_CONFIG) {
+        return;
+    }
+
+    idx = dm_index_of(dev);
+    if (idx < 0) return;
+    if ((uint8_t)idx != g_ictx.dev_idx) return;
+    if (dev->ieee_addr != g_ictx.ieee_addr) return;
+    if (dev->report_cfg_in_progress) return;
+
+    esp_zb_scheduler_alarm(alarm_start_step, (uint8_t)idx, 0);
 }
 
 void di_trigger_ieee_resolve(uint16_t nwk_addr)

@@ -19,6 +19,7 @@
 //   5. READ_BASIC  — manufacturer, model, power_source from cluster 0x0000
 //   6. READ_POWER  — battery voltage/% from cluster 0x0001 (if present)
 //   7. CONFIG_REPORT — configure reporting for all supported clusters
+//   8. WAIT_REPORT_CONFIG — validate Configure Reporting responses
 //
 // Only one interview runs at a time.  A lightweight FIFO queues device
 // indices when multiple devices join simultaneously.
@@ -42,6 +43,10 @@ void di_startup_probe_known_devices(void);
 
 /** Cancel pending interview/probe work for a device that is being removed. */
 void di_forget_device(uint8_t dev_idx, uint64_t ieee);
+
+/** Notify the interview state machine that a Configure Reporting response
+ *  updated the validation session for the given device. */
+void di_on_reporting_config_response(device_record_t *dev);
 
 // ---------------------------------------------------------------------------
 // ZDO response callbacks — registered with the SDK and called from Zigbee

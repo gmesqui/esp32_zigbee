@@ -244,12 +244,10 @@ uint16_t dm_slot_generation(uint8_t idx)
 // Presence check
 // ---------------------------------------------------------------------------
 
-// Offline thresholds relative to max_interval.
-// We use fixed timeouts since max_interval varies by device.
-// always-on: 2 * 3600 + 60 = 7260 s
-// sleepy:    3 * 3600 + 120 = 10920 s
-#define OFFLINE_THRESHOLD_ALWAYS_ON_MS  (7260u  * 1000u)
-#define OFFLINE_THRESHOLD_SLEEPY_MS     (10920u * 1000u)
+// Offline thresholds for inactivity-based presence fallback.
+// Shorter values make stale availability decay faster when no stack signal arrives.
+#define OFFLINE_THRESHOLD_ALWAYS_ON_MS  (300u  * 1000u)
+#define OFFLINE_THRESHOLD_SLEEPY_MS     (3600u * 1000u)
 
 void dm_check_presence(void)
 {

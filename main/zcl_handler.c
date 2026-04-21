@@ -286,8 +286,21 @@ static void send_read_attrs(uint16_t nwk_addr, uint8_t ep_id,
                             uint16_t cluster_id, uint8_t attr_count,
                             uint16_t *attrs)
 {
+    char attr_buf[96];
+    size_t used = 0;
+
     if (!attrs || attr_count == 0) {
         return;
+    }
+
+    attr_buf[0] = '\0';
+    for (uint8_t i = 0; i < attr_count; i++) {
+        int n = snprintf(attr_buf + used, sizeof(attr_buf) - used, "%s0x%04X",
+                         i ? "," : "", attrs[i]);
+        if (n < 0 || (size_t)n >= sizeof(attr_buf) - used) {
+            break;
+        }
+        used += (size_t)n;
     }
 
     esp_zb_zcl_read_attr_cmd_t cmd = {
@@ -301,6 +314,8 @@ static void send_read_attrs(uint16_t nwk_addr, uint8_t ep_id,
         .attr_number  = attr_count,
         .attr_field   = attrs,
     };
+    ZB_LOG("TX RAW dst=0x%04X ep=%u cluster=%s read_attrs=[%s]",
+           nwk_addr, ep_id, utils_cluster_name(cluster_id), attr_buf);
     esp_zb_zcl_read_attr_cmd_req(&cmd);
 }
 
@@ -600,10 +615,13 @@ esp_err_t zcl_on_report_attr(const esp_zb_zcl_report_attr_message_t *msg)
     uint8_t  src_ep  = msg->src_endpoint;
     uint16_t cluster = msg->cluster;  // report_attr_message has direct fields
 
-    // Log RAW
-    ZB_LOG("RX RAW src=0x%04X ep=%u cluster=%s attr=0x%04X type=0x%02X",
+    // Log RAW including a decoded value preview for faster diagnosis.
+    char raw_desc[96];
+    format_attr_value(cluster, msg->attribute.id, msg->attribute.data.type,
+                      msg->attribute.data.value, raw_desc, sizeof(raw_desc));
+    ZB_LOG("RX RAW src=0x%04X ep=%u cluster=%s attr=0x%04X type=0x%02X %s",
            src_nwk, src_ep, utils_cluster_name(cluster),
-           msg->attribute.id, msg->attribute.data.type);
+           msg->attribute.id, msg->attribute.data.type, raw_desc);
 
     // Find device
     device_record_t *dev = dm_find_by_nwk(src_nwk);

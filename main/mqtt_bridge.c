@@ -174,11 +174,13 @@ static void append_cluster_list_json(char **p, char *end,
 }
 
 static void append_configured_reportings_json(char **p, char *end,
+                                              const device_record_t *dev,
                                               const endpoint_record_t *ep)
 {
     rc_configured_reporting_t reportings[16];
     size_t reporting_count = rc_get_configured_reportings_for_endpoint(
-        ep, reportings, sizeof(reportings) / sizeof(reportings[0]));
+        ep, dev ? dev->is_sleepy : false,
+        reportings, sizeof(reportings) / sizeof(reportings[0]));
 
     json_append(p, end, "[");
     for (size_t i = 0; i < reporting_count; i++) {
@@ -252,7 +254,7 @@ static void append_endpoints_json(char **p, char *end, const device_record_t *de
             json_append(p, end, ",\"output\":");
             append_cluster_list_json(p, end, ep->out_clusters, ep->out_cluster_count);
             json_append(p, end, "},\"configured_reportings\":");
-            append_configured_reportings_json(p, end, ep);
+            append_configured_reportings_json(p, end, dev, ep);
             json_append(p, end, ",\"scenes\":[]}");
         }
     }

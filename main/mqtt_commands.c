@@ -127,6 +127,9 @@ static void mqtt_zb_op_alarm(uint8_t slot_idx)
                 .address_mode = ESP_ZB_APS_ADDR_MODE_16_ENDP_PRESENT,
                 .on_off_cmd_id = op->on_off_cmd_id,
             };
+            ZB_LOG("TX RAW dst=0x%04X ep=%u cluster=%s cmd=0x%02X",
+                   dev->nwk_addr, op->endpoint, utils_cluster_name(0x0006),
+                   op->on_off_cmd_id);
             ZB_LOG("MQTT SET state -> %s ep=%u cmd=0x%02X",
                    dm_display_name(dev), op->endpoint, op->on_off_cmd_id);
             esp_zb_zcl_on_off_cmd_req(&cmd);
@@ -145,6 +148,9 @@ static void mqtt_zb_op_alarm(uint8_t slot_idx)
                 .level = op->level,
                 .transition_time = 0,
             };
+            ZB_LOG("TX RAW dst=0x%04X ep=%u cluster=%s level=%u transition=%u",
+                   dev->nwk_addr, op->endpoint, utils_cluster_name(0x0008),
+                   op->level, 0u);
             ZB_LOG("MQTT SET brightness -> %s ep=%u level=%u",
                    dm_display_name(dev), op->endpoint, op->level);
             esp_zb_zcl_level_move_to_level_with_onoff_cmd_req(&cmd);
@@ -165,6 +171,9 @@ static void mqtt_zb_op_alarm(uint8_t slot_idx)
                 .attr_number = 1,
                 .attr_field = &attr,
             };
+            ZB_LOG("TX RAW dst=0x%04X ep=%u cluster=%s read_attrs=[0x%04X]",
+                   dev->nwk_addr, op->endpoint, utils_cluster_name(op->cluster_id),
+                   op->attr_id);
             ZB_LOG("MQTT GET -> %s ep=%u cluster=%s attr=%s",
                    dm_display_name(dev), op->endpoint,
                    utils_z2m_cluster_name(op->cluster_id),

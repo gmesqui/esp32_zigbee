@@ -1,5 +1,6 @@
 #include "report_config.h"
 #include "device_manager.h"
+#include "device_interview.h"
 #include "utils.h"
 #include <string.h>
 #include <stdio.h>
@@ -40,12 +41,33 @@ static const report_cfg_entry_t k_report_table[] = {
     { 0x0403, 0x0000, ZCL_INT16,  10,   3600, 10  },  // Pressure
     { 0x0400, 0x0000, ZCL_UINT16, 10,   3600, 500 },  // Illuminance
     { 0x0406, 0x0000, ZCL_BMP8,   0,    3600, 0   },  // Occupancy
-    { 0x0001, 0x0020, ZCL_UINT8,  3600, 43200, 1  },  // Battery voltage (100 mV steps)
-    { 0x0001, 0x0021, ZCL_UINT8,  3600, 43200, 2  },  // Battery %
+    { 0x0001, 0x0020, ZCL_UINT8,  3600, 3600, 1  },  // Battery voltage (100 mV steps)
+    { 0x0001, 0x0021, ZCL_UINT8,  3600, 3600, 2  },  // Battery %
     { 0x0500, 0x0002, ZCL_BMP16,  0,    3600, 0   },  // IAS Zone Status
     { 0x0B04, 0x050B, ZCL_INT16,  5,    3600, 10  },  // Active Power
 };
 #define REPORT_TABLE_COUNT  (sizeof(k_report_table) / sizeof(k_report_table[0]))
+
+#define REPORT_CFG_MAX_INTERVAL_ALWAYS_ON_S 300u
+#define REPORT_CFG_MAX_INTERVAL_SLEEPY_S    3600u
+#define READ_REPORT_CFG_QUEUE_LEN           4
+
+typedef struct {
+    uint64_t ieee_addr;
+    uint16_t nwk_addr;
+    uint8_t endpoint;
+    uint16_t cluster_id;
+    uint16_t attr_id;
+    bool in_use;
+} read_report_cfg_req_t;
+
+static read_report_cfg_req_t s_read_report_cfg_queue[READ_REPORT_CFG_QUEUE_LEN];
+
+static uint16_t rc_effective_max_interval(bool is_sleepy)
+{
+    return is_sleepy ? REPORT_CFG_MAX_INTERVAL_SLEEPY_S
+                     : REPORT_CFG_MAX_INTERVAL_ALWAYS_ON_S;
+}
 
 static void rc_configure_device_alarm(uint8_t dev_idx)
 {
@@ -54,6 +76,44 @@ static void rc_configure_device_alarm(uint8_t dev_idx)
         return;
     }
     rc_configure_device(dev);
+}
+
+static void rc_read_reporting_config_alarm(uint8_t slot)
+{
+    if (slot >= READ_REPORT_CFG_QUEUE_LEN) {
+        return;
+    }
+
+    read_report_cfg_req_t req = s_read_report_cfg_queue[slot];
+    s_read_report_cfg_queue[slot].in_use = false;
+    if (!req.in_use) {
+        return;
+    }
+
+    esp_zb_zcl_attribute_record_t record = {
+        .report_direction = ESP_ZB_ZCL_REPORT_DIRECTION_SEND,
+        .attributeID = req.attr_id,
+    };
+    esp_zb_zcl_read_report_config_cmd_t cmd = {
+        .zcl_basic_cmd = {
+            .src_endpoint = COORD_ENDPOINT,
+            .dst_addr_u.addr_short = req.nwk_addr,
+            .dst_endpoint = req.endpoint,
+        },
+        .address_mode = ESP_ZB_APS_ADDR_MODE_16_ENDP_PRESENT,
+        .clusterID = req.cluster_id,
+        .direction = ESP_ZB_ZCL_CMD_DIRECTION_TO_SRV,
+        .dis_default_resp = 1,
+        .manuf_specific = 0,
+        .manuf_code = 0,
+        .record_number = 1,
+        .record_field = &record,
+    };
+
+    ZB_LOG("TX RAW dst=0x%04X ep=%u cluster=%s read_report_cfg=[0x%04X]",
+           req.nwk_addr, req.endpoint, utils_cluster_name(req.cluster_id),
+           req.attr_id);
+    esp_zb_zcl_read_report_config_cmd_req(&cmd);
 }
 
 static bool endpoint_has_input_cluster(const endpoint_record_t *ep, uint16_t cluster_id)
@@ -69,6 +129,7 @@ static bool endpoint_has_input_cluster(const endpoint_record_t *ep, uint16_t clu
 }
 
 size_t rc_get_configured_reportings_for_endpoint(const endpoint_record_t *ep,
+                                                 bool is_sleepy,
                                                  rc_configured_reporting_t *out,
                                                  size_t out_len)
 {
@@ -86,7 +147,7 @@ size_t rc_get_configured_reportings_for_endpoint(const endpoint_record_t *ep,
             out[count].cluster_id = cfg->cluster_id;
             out[count].attr_id = cfg->attr_id;
             out[count].minimum_report_interval = cfg->min_interval;
-            out[count].maximum_report_interval = cfg->max_interval;
+            out[count].maximum_report_interval = rc_effective_max_interval(is_sleepy);
             out[count].reportable_change = cfg->reportable_change;
         }
         count++;
@@ -105,7 +166,7 @@ size_t rc_get_configured_reportings_for_endpoint(const endpoint_record_t *ep,
 // ---------------------------------------------------------------------------
 
 static void send_config_report(uint16_t nwk_addr, uint8_t endpoint,
-                                 const report_cfg_entry_t *cfg)
+                               bool is_sleepy, const report_cfg_entry_t *cfg)
 {
     // Storage for typed reportable_change value.
     // Must be in scope when esp_zb_zcl_config_report_cmd_req is called.
@@ -139,12 +200,14 @@ static void send_config_report(uint16_t nwk_addr, uint8_t endpoint,
     // For discrete types (BOOL, BMP16, etc.) rc_ptr stays NULL — the SDK
     // ignores the reportable_change field for those types.
 
+    uint16_t max_interval = rc_effective_max_interval(is_sleepy);
+
     esp_zb_zcl_config_report_record_t record = {
         .direction         = ESP_ZB_ZCL_REPORT_DIRECTION_SEND,
         .attributeID       = cfg->attr_id,
         .attrType          = cfg->attr_type,
         .min_interval      = cfg->min_interval,
-        .max_interval      = cfg->max_interval,
+        .max_interval      = max_interval,
         .reportable_change = rc_ptr,
     };
 
@@ -159,12 +222,17 @@ static void send_config_report(uint16_t nwk_addr, uint8_t endpoint,
         .record_field  = &record,
         .record_number = 1,
     };
+    ZB_LOG("TX RAW dst=0x%04X ep=%u cluster=%s attr=0x%04X type=0x%02X "
+           "cfg[min=%u max=%u change=%lu]",
+           nwk_addr, endpoint, utils_cluster_name(cfg->cluster_id),
+           cfg->attr_id, cfg->attr_type, cfg->min_interval, max_interval,
+           (unsigned long)cfg->reportable_change);
     esp_zb_zcl_config_report_cmd_req(&cmd);
 
     ZB_LOG("REPORT_CFG -> 0x%04X ep=%u cluster=%s attr=0x%04X "
            "min=%u max=%u change=%lu",
            nwk_addr, endpoint, utils_cluster_name(cfg->cluster_id),
-           cfg->attr_id, cfg->min_interval, cfg->max_interval,
+           cfg->attr_id, cfg->min_interval, max_interval,
            (unsigned long)cfg->reportable_change);
 }
 
@@ -172,9 +240,9 @@ static void send_config_report(uint16_t nwk_addr, uint8_t endpoint,
 // Public: configure all relevant clusters on a device
 // ---------------------------------------------------------------------------
 
-void rc_configure_device(device_record_t *dev)
+size_t rc_configure_device(device_record_t *dev)
 {
-    if (!dev) return;
+    if (!dev) return 0;
 
     ZB_LOG("REPORT_CFG start for %s (%s)",
            dm_display_name(dev), dev->is_sleepy ? "sleepy" : "always-on");
@@ -201,7 +269,7 @@ void rc_configure_device(device_record_t *dev)
                 rc_write_ias_cie_address(dev->nwk_addr, ep->endpoint_id);
             }
 
-            send_config_report(dev->nwk_addr, ep->endpoint_id, cfg);
+            send_config_report(dev->nwk_addr, ep->endpoint_id, dev->is_sleepy, cfg);
             configured_count++;
         }
     }
@@ -209,10 +277,14 @@ void rc_configure_device(device_record_t *dev)
     ZB_LOG("REPORT_CFG sent %d configure-reporting commands to %s",
            configured_count, dm_display_name(dev));
 
-    if (configured_count > 0) {
-        dev->reporting_configured = true;
-        dev->dirty = true;
-    }
+    dev->report_cfg_expected = (uint16_t)configured_count;
+    dev->report_cfg_received = 0;
+    dev->report_cfg_failed = 0;
+    dev->report_cfg_in_progress = (configured_count > 0);
+    dev->reporting_configured = (configured_count == 0);
+    dev->dirty = true;
+
+    return (size_t)configured_count;
 }
 
 void rc_configure_device_async(device_record_t *dev)
@@ -225,6 +297,31 @@ void rc_configure_device_async(device_record_t *dev)
     if (dev_idx < 0) return;
 
     esp_zb_scheduler_alarm(rc_configure_device_alarm, (uint8_t)dev_idx, 0);
+}
+
+bool rc_read_reporting_config_async(device_record_t *dev, uint8_t endpoint,
+                                    uint16_t cluster_id, uint16_t attr_id)
+{
+    if (!dev || !dev->in_use || endpoint == 0) {
+        return false;
+    }
+
+    for (uint8_t i = 0; i < READ_REPORT_CFG_QUEUE_LEN; i++) {
+        if (s_read_report_cfg_queue[i].in_use) {
+            continue;
+        }
+
+        s_read_report_cfg_queue[i].ieee_addr = dev->ieee_addr;
+        s_read_report_cfg_queue[i].nwk_addr = dev->nwk_addr;
+        s_read_report_cfg_queue[i].endpoint = endpoint;
+        s_read_report_cfg_queue[i].cluster_id = cluster_id;
+        s_read_report_cfg_queue[i].attr_id = attr_id;
+        s_read_report_cfg_queue[i].in_use = true;
+        esp_zb_scheduler_alarm(rc_read_reporting_config_alarm, i, 0);
+        return true;
+    }
+
+    return false;
 }
 
 // ---------------------------------------------------------------------------
@@ -241,14 +338,18 @@ void rc_on_config_resp(const esp_zb_zcl_cmd_config_report_resp_message_t *msg)
     uint16_t src_nwk = msg->info.src_address.u.short_addr;
     device_record_t *dev = dm_find_by_nwk(src_nwk);
     const char *name = dev ? dm_display_name(dev) : "?";
+    bool any_fail = (msg->info.status != ESP_ZB_ZCL_STATUS_SUCCESS);
 
-    // Iterate variable list for per-attribute status
     const esp_zb_zcl_config_report_resp_variable_t *var = msg->variables;
-    bool any_fail = false;
+    if (msg->info.status != ESP_ZB_ZCL_STATUS_SUCCESS) {
+        ZB_LOG("REPORT_CFG_RSP %s ep=%u cluster=%s CMD_FAIL status=0x%02X",
+               name, msg->info.src_endpoint, utils_cluster_name(msg->info.cluster),
+               (unsigned)msg->info.status);
+    }
     while (var) {
         if (var->status != ESP_ZB_ZCL_STATUS_SUCCESS) {
-            ZB_LOG("REPORT_CFG_RSP %s cluster=%s attr=0x%04X FAIL status=0x%02X",
-                   name, utils_cluster_name(msg->info.cluster),
+            ZB_LOG("REPORT_CFG_RSP %s ep=%u cluster=%s attr=0x%04X FAIL status=0x%02X",
+                   name, msg->info.src_endpoint, utils_cluster_name(msg->info.cluster),
                    var->attribute_id, (unsigned)var->status);
             any_fail = true;
         }
@@ -256,8 +357,60 @@ void rc_on_config_resp(const esp_zb_zcl_cmd_config_report_resp_message_t *msg)
     }
 
     if (!any_fail) {
-        ZB_LOG("REPORT_CFG_RSP %s cluster=%s OK",
-               name, utils_cluster_name(msg->info.cluster));
+        ZB_LOG("REPORT_CFG_RSP %s ep=%u cluster=%s OK",
+               name, msg->info.src_endpoint, utils_cluster_name(msg->info.cluster));
+    }
+
+    if (dev && dev->report_cfg_in_progress) {
+        if (dev->report_cfg_received < dev->report_cfg_expected) {
+            dev->report_cfg_received++;
+        }
+        if (any_fail) {
+            dev->report_cfg_failed++;
+        }
+        if (dev->report_cfg_received >= dev->report_cfg_expected) {
+            dev->report_cfg_in_progress = false;
+            dev->reporting_configured = (dev->report_cfg_failed == 0);
+            dev->dirty = true;
+        }
+    }
+
+    di_on_reporting_config_response(dev);
+}
+
+void rc_on_read_report_cfg_resp(const esp_zb_zcl_cmd_read_report_config_resp_message_t *msg)
+{
+    if (!msg) {
+        return;
+    }
+
+    uint16_t src_nwk = msg->info.src_address.u.short_addr;
+    device_record_t *dev = dm_find_by_nwk(src_nwk);
+    const char *name = dev ? dm_display_name(dev) : "?";
+
+    const esp_zb_zcl_read_report_config_resp_variable_t *var = msg->variables;
+    if (!var) {
+        ZB_LOG("READ_REPORT_CFG_RSP %s ep=%u cluster=%s empty",
+               name, msg->info.src_endpoint, utils_cluster_name(msg->info.cluster));
+        return;
+    }
+
+    while (var) {
+        if (var->status != ESP_ZB_ZCL_STATUS_SUCCESS) {
+            ZB_LOG("READ_REPORT_CFG_RSP %s ep=%u cluster=%s attr=0x%04X FAIL status=0x%02X",
+                   name, msg->info.src_endpoint, utils_cluster_name(msg->info.cluster),
+                   var->attribute_id, (unsigned)var->status);
+        } else if (var->report_direction == ESP_ZB_ZCL_REPORT_DIRECTION_SEND) {
+            ZB_LOG("READ_REPORT_CFG_RSP %s ep=%u cluster=%s attr=0x%04X dir=send type=0x%02X min=%u max=%u",
+                   name, msg->info.src_endpoint, utils_cluster_name(msg->info.cluster),
+                   var->attribute_id, var->client.attr_type,
+                   var->client.min_interval, var->client.max_interval);
+        } else {
+            ZB_LOG("READ_REPORT_CFG_RSP %s ep=%u cluster=%s attr=0x%04X dir=recv timeout=%u",
+                   name, msg->info.src_endpoint, utils_cluster_name(msg->info.cluster),
+                   var->attribute_id, var->server.timeout);
+        }
+        var = var->next;
     }
 }
 

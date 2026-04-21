@@ -86,6 +86,10 @@ typedef struct {
     int8_t    last_rssi;
     uint8_t   last_lqi;
     bool      radio_metrics_valid;
+    bool      report_cfg_in_progress;
+    uint16_t  report_cfg_expected;
+    uint16_t  report_cfg_received;
+    uint16_t  report_cfg_failed;
 
     // --- Telemetry counters (NOT persisted) ---
     uint32_t  report_attr_ok;

@@ -3,9 +3,11 @@
 #include "device_interview.h"
 #include "nvs_cache.h"
 #include "button_handler.h"
+#include "report_config.h"
 #include "utils.h"
 
 #include <stdio.h>
+#include <stdlib.h>
 #include <string.h>
 
 #include "freertos/FreeRTOS.h"
@@ -230,6 +232,69 @@ static void cmd_reinterview(void)
     printf("Re-interview queued for %s\n", dm_display_name(dev));
 }
 
+static void cmd_read_reporting_config(void)
+{
+    char ieee_str[24] = {0};
+    char ep_str[8] = {0};
+    char cluster_str[16] = {0};
+    char attr_str[16] = {0};
+
+    printf("Enter IEEE: ");
+    fflush(stdout);
+    read_line(ieee_str, sizeof(ieee_str));
+
+    uint64_t ieee = 0;
+    if (!utils_str_to_ieee(ieee_str, &ieee)) {
+        printf("Invalid IEEE.\n");
+        return;
+    }
+
+    dm_lock();
+    device_record_t *dev = dm_find_by_ieee(ieee);
+    dm_unlock();
+    if (!dev) {
+        printf("Device not found.\n");
+        return;
+    }
+
+    printf("Enter endpoint (decimal): ");
+    fflush(stdout);
+    read_line(ep_str, sizeof(ep_str));
+    long endpoint = strtol(ep_str, NULL, 10);
+    if (endpoint <= 0 || endpoint > 255) {
+        printf("Invalid endpoint.\n");
+        return;
+    }
+
+    printf("Enter cluster hex (e.g. 0006): ");
+    fflush(stdout);
+    read_line(cluster_str, sizeof(cluster_str));
+    long cluster_id = strtol(cluster_str, NULL, 16);
+    if (cluster_id < 0 || cluster_id > 0xFFFF) {
+        printf("Invalid cluster.\n");
+        return;
+    }
+
+    printf("Enter attribute hex (e.g. 0000): ");
+    fflush(stdout);
+    read_line(attr_str, sizeof(attr_str));
+    long attr_id = strtol(attr_str, NULL, 16);
+    if (attr_id < 0 || attr_id > 0xFFFF) {
+        printf("Invalid attribute.\n");
+        return;
+    }
+
+    if (!rc_read_reporting_config_async(dev, (uint8_t)endpoint,
+                                        (uint16_t)cluster_id,
+                                        (uint16_t)attr_id)) {
+        printf("Unable to queue Read Reporting Configuration.\n");
+        return;
+    }
+
+    printf("Read Reporting Configuration queued for %s ep=%u cluster=0x%04lX attr=0x%04lX\n",
+           dm_display_name(dev), (unsigned)endpoint, cluster_id, attr_id);
+}
+
 static void cmd_erase_cache(void)
 {
     char confirm[8] = {0};
@@ -256,6 +321,7 @@ static void cmd_help(void)
         "  3 - FreeRTOS task list\n"
         "  4 - Heap statistics\n"
         "  5 - Interview queue status\n"
+        "  g - Read reporting config (interactive)\n"
         "  n - Set friendly name\n"
         "  j - Toggle permit join\n"
         "  r - Re-interview device\n"
@@ -286,6 +352,9 @@ static void serial_cmd_task(void *arg)
             case '4': cmd_heap_stats(); break;
             case '5':
                 ZB_PRINT("Interview: use logs to track state.\n");
+                break;
+            case 'g':
+                cmd_read_reporting_config();
                 break;
             case 'n':
                 cmd_set_friendly_name();

@@ -6,6 +6,7 @@ Coordinador Zigbee completo para `ESP32-C5-KITC-A V1.2` con `ESP-IDF` y `ESP Zig
 
 - SoC: **ESP32-C5**, radio nativa 2.4 GHz IEEE 802.15.4
 - Flash: 4 MiB
+- Ethernet: W5500 por SPI (`SPI2_HOST`)
 - LED RGB: WS2812 en GPIO 27
 - Boton BOOT: GPIO 28 (permit-join)
 - UART0: 115200 baud (monitor serie)
@@ -158,6 +159,20 @@ app_main()
 - Pulsacion corta: abre permit-join 180 s (o cierra si ya estaba abierto)
 - Antirebote hardware: 200 ms
 
+### Patillaje Ethernet (W5500 por SPI)
+
+| Senal | GPIO | Notas |
+|-------|------|-------|
+| `MOSI` | 4 | SPI hacia el W5500 |
+| `MISO` | 5 | SPI desde el W5500 |
+| `SCLK` | 6 | Reloj SPI |
+| `CS` | 23 | Chip select del W5500 |
+| `INT` | 24 | Interrupcion del W5500 |
+| `RST` | 25 | Reset del W5500 |
+
+- Host SPI usado: `SPI2_HOST`
+- Frecuencia SPI configurada: `20 MHz`
+
 ---
 
 ## Comandos serie (UART0)
@@ -267,6 +282,13 @@ Comportamiento ante informes repetidos: `last_seen_s` se actualiza siempre; `rep
 | `DEBOUNCE_MS` | 200 | Antirebote boton |
 | `LED_STRIP_GPIO` | 27 | GPIO WS2812 |
 | `BOOT_BUTTON_GPIO` | 28 | GPIO boton BOOT |
+| `ETH_MOSI_GPIO` | 4 | SPI MOSI hacia W5500 |
+| `ETH_MISO_GPIO` | 5 | SPI MISO desde W5500 |
+| `ETH_SCLK_GPIO` | 6 | SPI clock W5500 |
+| `ETH_CS_GPIO` | 23 | Chip select W5500 |
+| `ETH_INT_GPIO` | 24 | Interrupcion W5500 |
+| `ETH_RST_GPIO` | 25 | Reset W5500 |
+| `ETH_SPI_CLOCK_HZ` | 20 000 000 | SPI Ethernet a 20 MHz |
 | `NVS_CACHE_VERSION` | 3 | Version de esquema NVS |
 
 ---
