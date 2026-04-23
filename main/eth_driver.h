@@ -9,7 +9,7 @@
 // eth_driver_init() is non-blocking: it starts the SPI/W5500 driver and
 // DHCP negotiation asynchronously.  When an IP address is obtained, the bit
 // ETH_IP_READY_BIT is set in the returned event group.  mDNS is also started
-// at that point (hostname "ESP32-zigbee").
+// at that point (hostname "esp32-zigbee").
 // ---------------------------------------------------------------------------
 
 #define ETH_IP_READY_BIT  BIT0

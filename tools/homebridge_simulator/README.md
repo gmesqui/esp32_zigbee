@@ -5,8 +5,8 @@ todavia de Homebridge ni de su plugin.
 
 Valores por defecto:
 
-- Host mDNS: `ESP32-zigbee.local`
-- URL: `ws://ESP32-zigbee.local:8080/ws`
+- Host mDNS: `esp32-zigbee.local`
+- URL: `ws://esp32-zigbee.local:8080/ws`
 - Protocolo: mensajes JSON con `type`, `msg_id`, `require_ack` y `data`
 
 Uso rapido:

@@ -38,9 +38,9 @@ static void mdns_init_once(void)
         ZB_LOG("mDNS: init failed (%s)", esp_err_to_name(err));
         return;
     }
-    mdns_hostname_set("ESP32-zigbee");
+    mdns_hostname_set("esp32-zigbee");
     mdns_instance_name_set("ESP32 Zigbee Coordinator");
-    ZB_LOG("mDNS: hostname=ESP32-zigbee.local");
+    ZB_LOG("mDNS: hostname=esp32-zigbee.local");
 }
 
 // ---------------------------------------------------------------------------

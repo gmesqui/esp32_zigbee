@@ -9,7 +9,7 @@ void main() {
   runApp(const HomebridgeSimulatorApp());
 }
 
-const _defaultMdnsName = 'ESP32-zigbee.local';
+const _defaultMdnsName = 'esp32-zigbee.local';
 const _defaultPort = '8080';
 const _defaultPath = '/ws';
 const _protocolVersion = 1;
@@ -59,6 +59,13 @@ class _SimulatorScreenState extends State<SimulatorScreen> {
   WebSocketChannel? _channel;
   StreamSubscription<dynamic>? _subscription;
   final List<_LogEntry> _log = [];
+  final Map<String, _InventoryDevice> _inventoryById = {};
+  final Map<String, _StateDeviceSnapshot> _stateById = {};
+  final Map<String, _ChunkAccumulator<_InventoryDevice>> _inventoryStreams = {};
+  final Map<String, _ChunkAccumulator<_StateDeviceSnapshot>> _stateStreams = {};
+  final Map<int, _PendingDeviceCommand> _pendingCommandsByMsgId = {};
+  final Map<String, _PendingDeviceCommand> _pendingCommandsByDeviceId = {};
+
   var _nextMsgId = 1;
   var _useTls = false;
   var _sendHelloOnConnect = false;
@@ -66,6 +73,35 @@ class _SimulatorScreenState extends State<SimulatorScreen> {
   var _connected = false;
 
   bool get _canSend => _connected && _channel != null;
+
+  List<_TrackedDevice> get _trackedDevices {
+    final deviceIds = <String>{
+      ..._inventoryById.keys,
+      ..._stateById.keys,
+    }.toList()
+      ..sort((left, right) {
+        final leftName =
+            (_inventoryById[left]?.name ?? left).toLowerCase();
+        final rightName =
+            (_inventoryById[right]?.name ?? right).toLowerCase();
+        final nameCompare = leftName.compareTo(rightName);
+        if (nameCompare != 0) {
+          return nameCompare;
+        }
+        return left.compareTo(right);
+      });
+
+    return deviceIds
+        .map(
+          (deviceId) => _TrackedDevice(
+            deviceId: deviceId,
+            inventory: _inventoryById[deviceId],
+            snapshot: _stateById[deviceId],
+            pendingCommand: _pendingCommandsByDeviceId[deviceId],
+          ),
+        )
+        .toList(growable: false);
+  }
 
   @override
   void initState() {
@@ -157,7 +193,10 @@ class _SimulatorScreenState extends State<SimulatorScreen> {
     }
 
     if (mounted) {
-      setState(() => _connected = false);
+      setState(() {
+        _connected = false;
+        _clearPendingCommands();
+      });
     }
     _addLog(_LogDirection.system, 'Desconectado');
   }
@@ -171,6 +210,7 @@ class _SimulatorScreenState extends State<SimulatorScreen> {
       _connected = false;
       _connecting = false;
       _channel = null;
+      _clearPendingCommands();
     });
     _addLog(_LogDirection.system, 'Conexion cerrada por el ESP32');
   }
@@ -178,6 +218,40 @@ class _SimulatorScreenState extends State<SimulatorScreen> {
   void _handleIncoming(dynamic message) {
     final text = message?.toString() ?? '';
     _addLog(_LogDirection.rx, text);
+    _processIncoming(text);
+  }
+
+  void _processIncoming(String rawText) {
+    final message = _asStringKeyedMap(_decodeJsonSafely(rawText));
+    if (message == null) {
+      return;
+    }
+
+    final type = _asString(message['type']);
+    final data = _asStringKeyedMap(message['data']) ?? const <String, dynamic>{};
+
+    switch (type) {
+      case 'inventory_chunk':
+        _acceptInventoryChunk(data);
+        break;
+      case 'state_chunk':
+        _acceptStateChunk(data);
+        break;
+      case 'event':
+      case 'device_joined':
+      case 'device_updated':
+      case 'device_left':
+        _acceptDeviceEvent(type!, data);
+        break;
+      case 'cmd_result':
+        _handleCmdResult(message);
+        break;
+      case 'error':
+        _handleCmdError(message);
+        break;
+      default:
+        break;
+    }
   }
 
   void _sendJson() {
@@ -192,21 +266,34 @@ class _SimulatorScreenState extends State<SimulatorScreen> {
       return;
     }
 
+    Object? decoded;
     try {
-      jsonDecode(text);
+      decoded = jsonDecode(text);
     } on FormatException catch (error) {
       _addLog(_LogDirection.error, 'JSON invalido: ${error.message}');
       return;
     }
 
+    _trackOutgoingCommand(decoded);
     _channel!.sink.add(text);
     _addLog(_LogDirection.tx, text);
   }
 
   void _sendObject(Map<String, dynamic> message) {
+    _trackOutgoingCommand(message);
     final text = _pretty(message);
     _channel?.sink.add(text);
     _addLog(_LogDirection.tx, text);
+  }
+
+  void _sendDeviceStateCommand(String deviceId, bool state) {
+    if (!_canSend) {
+      _addLog(_LogDirection.error, 'No hay conexion activa');
+      return;
+    }
+
+    _deviceIdController.text = deviceId;
+    _sendObject(_commandMessage(deviceId, state));
   }
 
   void _applyTemplate(_MessageTemplate template) {
@@ -299,6 +386,312 @@ class _SimulatorScreenState extends State<SimulatorScreen> {
     });
   }
 
+  void _acceptInventoryChunk(Map<String, dynamic> data) {
+    _acceptChunk<_InventoryDevice>(
+      streams: _inventoryStreams,
+      data: data,
+      itemParser: (item) => _InventoryDevice.fromJson(item),
+      onComplete: (devices) {
+        _inventoryById
+          ..clear()
+          ..addEntries(
+            devices.map((device) => MapEntry(device.deviceId, device)),
+          );
+        _stateById.removeWhere((deviceId, _) => !_inventoryById.containsKey(deviceId));
+        _dropPendingForUnknownDevices();
+      },
+    );
+  }
+
+  void _acceptStateChunk(Map<String, dynamic> data) {
+    _acceptChunk<_StateDeviceSnapshot>(
+      streams: _stateStreams,
+      data: data,
+      itemParser: (item) => _StateDeviceSnapshot.fromJson(item),
+      onComplete: (devices) {
+        _stateById
+          ..clear()
+          ..addEntries(
+            devices.map((device) => MapEntry(device.deviceId, device)),
+          );
+      },
+    );
+  }
+
+  void _acceptChunk<T>({
+    required Map<String, _ChunkAccumulator<T>> streams,
+    required Map<String, dynamic> data,
+    required T? Function(Map<String, dynamic> item) itemParser,
+    required void Function(List<T> items) onComplete,
+  }) {
+    final streamId = _asString(data['stream_id']);
+    final generation = _asInt(data['generation']);
+    final index = _asInt(data['index']);
+    final isFinal = data['final'] == true;
+    if (streamId == null || generation == null || index == null) {
+      return;
+    }
+
+    final rawItems = data['devices'];
+    final items = rawItems is List
+        ? rawItems
+            .map((item) => _asStringKeyedMap(item))
+            .whereType<Map<String, dynamic>>()
+            .map(itemParser)
+            .whereType<T>()
+            .toList(growable: false)
+        : <T>[];
+
+    setState(() {
+      final accumulator =
+          streams[streamId] ?? _ChunkAccumulator<T>(generation: generation);
+      accumulator.generation = generation;
+      accumulator.chunks[index] = items;
+      if (isFinal) {
+        accumulator.finalIndex = index;
+      }
+      streams[streamId] = accumulator;
+
+      final finalIndex = accumulator.finalIndex;
+      if (finalIndex == null) {
+        return;
+      }
+
+      for (var chunkIndex = 0; chunkIndex <= finalIndex; chunkIndex++) {
+        if (!accumulator.chunks.containsKey(chunkIndex)) {
+          return;
+        }
+      }
+
+      final mergedItems = <T>[];
+      for (var chunkIndex = 0; chunkIndex <= finalIndex; chunkIndex++) {
+        final chunkItems = accumulator.chunks[chunkIndex];
+        if (chunkItems != null) {
+          mergedItems.addAll(chunkItems);
+        }
+      }
+
+      streams.remove(streamId);
+      onComplete(mergedItems);
+    });
+  }
+
+  void _acceptDeviceEvent(String type, Map<String, dynamic> data) {
+    final deviceId = _asString(data['device_id']);
+
+    setState(() {
+      if (deviceId != null && deviceId.isNotEmpty) {
+        final existingInventory = _inventoryById[deviceId];
+        final existingState = _stateById[deviceId] ??
+            _StateDeviceSnapshot.empty(deviceId);
+
+        if (type == 'device_joined' || type == 'device_updated') {
+          final incomingName = _asString(data['name']);
+          _inventoryById[deviceId] = (existingInventory ??
+                  _InventoryDevice.placeholder(deviceId))
+              .copyWith(name: incomingName);
+        }
+
+        if (type == 'device_left') {
+          _stateById[deviceId] = existingState.copyWith(
+            meta: existingState.meta.copyWith(
+              reachable: false,
+              lastSeen: _protocolNow(),
+            ),
+          );
+        }
+
+        if (type == 'device_joined') {
+          _stateById[deviceId] = existingState.copyWith(
+            meta: existingState.meta.copyWith(
+              reachable: true,
+              lastSeen: _protocolNow(),
+            ),
+          );
+        }
+
+        if (type == 'event') {
+          _stateById[deviceId] = _applyChangesToSnapshot(existingState, data);
+        }
+      }
+    });
+  }
+
+  _StateDeviceSnapshot _applyChangesToSnapshot(
+    _StateDeviceSnapshot snapshot,
+    Map<String, dynamic> data,
+  ) {
+    var meta = snapshot.meta.copyWith(lastSeen: _protocolNow());
+    final nextState = Map<String, _AttributeValue>.from(snapshot.state);
+    final changes = _asStringKeyedMap(data['changes']);
+    if (changes != null) {
+      for (final entry in changes.entries) {
+        final value = _AttributeValue.fromJson(_asStringKeyedMap(entry.value));
+        if (entry.key == 'reachable') {
+          meta = meta.copyWith(reachable: value.boolValue);
+        } else {
+          nextState[entry.key] = value;
+        }
+      }
+    }
+
+    return snapshot.copyWith(meta: meta, state: nextState);
+  }
+
+  void _trackOutgoingCommand(Object? message) {
+    final json = _asStringKeyedMap(message);
+    final type = _asString(json?['type']);
+    if (json == null || type != 'cmd') {
+      return;
+    }
+
+    final msgId = _asInt(json['msg_id']);
+    final data = _asStringKeyedMap(json['data']);
+    final params = _asStringKeyedMap(data?['params']);
+    final deviceId = _asString(data?['device_id']);
+    final cluster = _asString(data?['cluster']);
+    final command = _asString(data?['command']);
+    final state = params?['state'];
+
+    if (msgId == null ||
+        deviceId == null ||
+        cluster != 'onoff' ||
+        command != 'set' ||
+        state is! bool) {
+      return;
+    }
+
+    final pending = _PendingDeviceCommand(
+      msgId: msgId,
+      deviceId: deviceId,
+      desiredState: state,
+      previousState: _stateById[deviceId]?.state['state']?.boolValue,
+    );
+
+    setState(() {
+      _removePendingForDevice(deviceId);
+      _pendingCommandsByMsgId[msgId] = pending;
+      _pendingCommandsByDeviceId[deviceId] = pending;
+    });
+  }
+
+  void _handleCmdResult(Map<String, dynamic> message) {
+    final replyTo = _asInt(message['reply_to']);
+    final data = _asStringKeyedMap(message['data']);
+
+    if (replyTo == null) {
+      return;
+    }
+
+    setState(() {
+      final pending = _takePendingCommand(replyTo);
+      if (pending == null || data == null) {
+        return;
+      }
+
+      final status = _asString(data['status']);
+      final applied = data['applied'] == true;
+      if (status == 'ok' && applied) {
+        final snapshot = _stateById[pending.deviceId] ??
+            _StateDeviceSnapshot.empty(pending.deviceId);
+        _stateById[pending.deviceId] = snapshot.copyWith(
+          meta: snapshot.meta.copyWith(lastSeen: _protocolNow()),
+          state: {
+            ...snapshot.state,
+            'state': _AttributeValue(
+              value: pending.desiredState ? 'ON' : 'OFF',
+              ts: _protocolNow(),
+              quality: 'valid',
+            ),
+          },
+        );
+      }
+    });
+  }
+
+  void _handleCmdError(Map<String, dynamic> message) {
+    final replyTo = _asInt(message['reply_to']);
+    if (replyTo == null) {
+      return;
+    }
+
+    setState(() {
+      _takePendingCommand(replyTo);
+    });
+  }
+
+  _PendingDeviceCommand? _takePendingCommand(int msgId) {
+    final pending = _pendingCommandsByMsgId.remove(msgId);
+    if (pending == null) {
+      return null;
+    }
+
+    final current = _pendingCommandsByDeviceId[pending.deviceId];
+    if (current?.msgId == msgId) {
+      _pendingCommandsByDeviceId.remove(pending.deviceId);
+    }
+    return pending;
+  }
+
+  void _removePendingForDevice(String deviceId) {
+    final existing = _pendingCommandsByDeviceId.remove(deviceId);
+    if (existing != null) {
+      _pendingCommandsByMsgId.remove(existing.msgId);
+    }
+  }
+
+  void _dropPendingForUnknownDevices() {
+    final validIds = <String>{..._inventoryById.keys, ..._stateById.keys};
+    _pendingCommandsByDeviceId.removeWhere((deviceId, _) => !validIds.contains(deviceId));
+    _pendingCommandsByMsgId.removeWhere(
+      (_, pending) => !validIds.contains(pending.deviceId),
+    );
+  }
+
+  void _clearPendingCommands() {
+    _pendingCommandsByMsgId.clear();
+    _pendingCommandsByDeviceId.clear();
+  }
+
+  void _loadDeviceIntoComposer(String deviceId) {
+    setState(() {
+      _deviceIdController.text = deviceId;
+    });
+  }
+
+  int _protocolNow() => DateTime.now().millisecondsSinceEpoch ~/ 1000;
+
+  Object? _decodeJsonSafely(String rawText) {
+    try {
+      return jsonDecode(rawText);
+    } on Object {
+      return null;
+    }
+  }
+
+  Map<String, dynamic>? _asStringKeyedMap(Object? value) {
+    if (value is Map) {
+      return value.map(
+        (key, item) => MapEntry(key.toString(), item),
+      );
+    }
+    return null;
+  }
+
+  int? _asInt(Object? value) {
+    if (value is int) {
+      return value;
+    }
+    if (value is num) {
+      return value.toInt();
+    }
+    return null;
+  }
+
+  String? _asString(Object? value) {
+    return value is String ? value : null;
+  }
+
   String _formatPayload(String rawText) {
     try {
       return _pretty(jsonDecode(rawText));
@@ -338,25 +731,7 @@ class _SimulatorScreenState extends State<SimulatorScreen> {
       body: SafeArea(
         child: LayoutBuilder(
           builder: (context, constraints) {
-            final wide = constraints.maxWidth >= 920;
-            final content = wide
-                ? Row(
-                    crossAxisAlignment: CrossAxisAlignment.stretch,
-                    children: [
-                      Expanded(flex: 6, child: _buildLogPanel()),
-                      const SizedBox(width: 16),
-                      SizedBox(width: 430, child: _buildComposerPanel()),
-                    ],
-                  )
-                : SingleChildScrollView(
-                    child: Column(
-                      children: [
-                        SizedBox(height: 360, child: _buildLogPanel()),
-                        const SizedBox(height: 16),
-                        SizedBox(height: 560, child: _buildComposerPanel()),
-                      ],
-                    ),
-                  );
+            final desktop = constraints.maxWidth >= 960;
 
             return Padding(
               padding: const EdgeInsets.all(16),
@@ -364,12 +739,66 @@ class _SimulatorScreenState extends State<SimulatorScreen> {
                 children: [
                   _buildConnectionPanel(),
                   const SizedBox(height: 16),
-                  Expanded(child: content),
+                  Expanded(
+                    child: desktop
+                        ? _buildDesktopContent()
+                        : _buildMobileContent(),
+                  ),
                 ],
               ),
             );
           },
         ),
+      ),
+    );
+  }
+
+  Widget _buildDesktopContent() {
+    return Row(
+      crossAxisAlignment: CrossAxisAlignment.stretch,
+      children: [
+        Expanded(flex: 5, child: _buildLogPanel()),
+        const SizedBox(width: 16),
+        Expanded(
+          flex: 6,
+          child: LayoutBuilder(
+            builder: (context, constraints) {
+              final splitRight = constraints.maxWidth >= 760;
+              if (splitRight) {
+                return Row(
+                  crossAxisAlignment: CrossAxisAlignment.stretch,
+                  children: [
+                    Expanded(flex: 5, child: _buildComposerPanel()),
+                    const SizedBox(width: 16),
+                    Expanded(flex: 4, child: _buildDevicesPanel()),
+                  ],
+                );
+              }
+
+              return Column(
+                children: [
+                  Expanded(flex: 6, child: _buildComposerPanel()),
+                  const SizedBox(height: 16),
+                  Expanded(flex: 5, child: _buildDevicesPanel()),
+                ],
+              );
+            },
+          ),
+        ),
+      ],
+    );
+  }
+
+  Widget _buildMobileContent() {
+    return SingleChildScrollView(
+      child: Column(
+        children: [
+          SizedBox(height: 320, child: _buildLogPanel()),
+          const SizedBox(height: 16),
+          SizedBox(height: 560, child: _buildComposerPanel()),
+          const SizedBox(height: 16),
+          SizedBox(height: 560, child: _buildDevicesPanel()),
+        ],
       ),
     );
   }
@@ -621,6 +1050,70 @@ class _SimulatorScreenState extends State<SimulatorScreen> {
       ),
     );
   }
+
+  Widget _buildDevicesPanel() {
+    final devices = _trackedDevices;
+
+    return _Panel(
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          Row(
+            children: [
+              const Icon(Icons.devices_other_outlined),
+              const SizedBox(width: 8),
+              Text(
+                'Dispositivos',
+                style: Theme.of(context).textTheme.titleMedium,
+              ),
+              const Spacer(),
+              Text(
+                '${devices.length}',
+                style: Theme.of(context).textTheme.labelLarge,
+              ),
+            ],
+          ),
+          const SizedBox(height: 6),
+          Text(
+            'Inventario y estado en tiempo real a partir de inventory/state/event.',
+            style: Theme.of(context).textTheme.bodySmall?.copyWith(
+              color: Theme.of(context).colorScheme.onSurfaceVariant,
+            ),
+          ),
+          const SizedBox(height: 12),
+          Expanded(
+            child: devices.isEmpty
+                ? Center(
+                    child: Text(
+                      'Aun no se han recibido dispositivos',
+                      style: Theme.of(context).textTheme.bodyMedium?.copyWith(
+                        color: Theme.of(context).colorScheme.onSurfaceVariant,
+                      ),
+                    ),
+                  )
+                : ListView.separated(
+                    itemCount: devices.length,
+                    separatorBuilder: (_, _) => const SizedBox(height: 10),
+                    itemBuilder: (context, index) {
+                      final device = devices[index];
+                      return _DeviceTile(
+                        device: device,
+                        canSend: _canSend,
+                        onUseDeviceId: () => _loadDeviceIntoComposer(device.deviceId),
+                        onToggleSwitch: device.supportsSwitch
+                            ? (value) => _sendDeviceStateCommand(
+                                  device.deviceId,
+                                  value,
+                                )
+                            : null,
+                      );
+                    },
+                  ),
+          ),
+        ],
+      ),
+    );
+  }
 }
 
 class _Panel extends StatelessWidget {
@@ -698,6 +1191,233 @@ class _TemplateButton extends StatelessWidget {
       onPressed: onPressed,
       icon: Icon(icon, size: 18),
       label: Text(label),
+    );
+  }
+}
+
+class _DeviceTile extends StatelessWidget {
+  const _DeviceTile({
+    required this.device,
+    required this.canSend,
+    required this.onUseDeviceId,
+    required this.onToggleSwitch,
+  });
+
+  final _TrackedDevice device;
+  final bool canSend;
+  final VoidCallback onUseDeviceId;
+  final ValueChanged<bool>? onToggleSwitch;
+
+  @override
+  Widget build(BuildContext context) {
+    final theme = Theme.of(context);
+
+    return DecoratedBox(
+      decoration: BoxDecoration(
+        color: const Color(0xFFF9FBFA),
+        border: Border.all(color: const Color(0xFFD8E1DD)),
+        borderRadius: BorderRadius.circular(8),
+      ),
+      child: Padding(
+        padding: const EdgeInsets.all(12),
+        child: Column(
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            Row(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                Expanded(
+                  child: Column(
+                    crossAxisAlignment: CrossAxisAlignment.start,
+                    children: [
+                      Text(
+                        device.name,
+                        style: theme.textTheme.titleSmall?.copyWith(
+                          fontWeight: FontWeight.w700,
+                        ),
+                      ),
+                      const SizedBox(height: 4),
+                      Wrap(
+                        spacing: 6,
+                        runSpacing: 6,
+                        children: [
+                          _Badge(
+                            label: device.reachableLabel,
+                            backgroundColor: device.isReachable == true
+                                ? const Color(0xFFE3F4E8)
+                                : const Color(0xFFF7E6E6),
+                            foregroundColor: device.isReachable == true
+                                ? const Color(0xFF1E7A3E)
+                                : const Color(0xFF8A1F1F),
+                          ),
+                          if (device.pendingCommand != null)
+                            const _Badge(
+                              label: 'Pendiente',
+                              backgroundColor: Color(0xFFFFF3DA),
+                              foregroundColor: Color(0xFF8A5A00),
+                            ),
+                        ],
+                      ),
+                    ],
+                  ),
+                ),
+                IconButton(
+                  onPressed: onUseDeviceId,
+                  tooltip: 'Usar device_id en el composer',
+                  icon: const Icon(Icons.keyboard_command_key_outlined),
+                ),
+              ],
+            ),
+            const SizedBox(height: 6),
+            Text(
+              device.subtitle,
+              style: theme.textTheme.bodySmall?.copyWith(
+                color: theme.colorScheme.onSurfaceVariant,
+              ),
+            ),
+            const SizedBox(height: 4),
+            SelectableText(
+              device.deviceId,
+              style: const TextStyle(
+                fontFamily: 'monospace',
+                fontSize: 12.5,
+              ),
+            ),
+            if (device.capabilities.isNotEmpty) ...[
+              const SizedBox(height: 8),
+              Wrap(
+                spacing: 6,
+                runSpacing: 6,
+                children: device.capabilities
+                    .map((capability) => Chip(label: Text(capability)))
+                    .toList(growable: false),
+              ),
+            ],
+            if (device.metaSummary.isNotEmpty) ...[
+              const SizedBox(height: 8),
+              Text(
+                device.metaSummary,
+                style: theme.textTheme.bodySmall?.copyWith(
+                  color: theme.colorScheme.onSurfaceVariant,
+                ),
+              ),
+            ],
+            if (device.supportsSwitch) ...[
+              const SizedBox(height: 10),
+              Row(
+                children: [
+                  Expanded(
+                    child: Text(
+                      'Switch on/off',
+                      style: theme.textTheme.bodyMedium,
+                    ),
+                  ),
+                  Text(
+                    device.switchValue == true ? 'ON' : 'OFF',
+                    style: theme.textTheme.labelLarge,
+                  ),
+                  const SizedBox(width: 8),
+                  if (device.pendingCommand != null)
+                    const SizedBox(
+                      width: 18,
+                      height: 18,
+                      child: CircularProgressIndicator(strokeWidth: 2.2),
+                    ),
+                  if (device.pendingCommand != null) const SizedBox(width: 10),
+                  Switch.adaptive(
+                    value: device.switchValue ?? false,
+                    onChanged: canSend && onToggleSwitch != null
+                        ? onToggleSwitch
+                        : null,
+                  ),
+                ],
+              ),
+            ],
+            if (device.stateEntries.isNotEmpty) ...[
+              const SizedBox(height: 8),
+              Wrap(
+                spacing: 8,
+                runSpacing: 8,
+                children: device.stateEntries
+                    .map((entry) => _StateChip(name: entry.key, value: entry.value))
+                    .toList(growable: false),
+              ),
+            ],
+          ],
+        ),
+      ),
+    );
+  }
+}
+
+class _Badge extends StatelessWidget {
+  const _Badge({
+    required this.label,
+    required this.backgroundColor,
+    required this.foregroundColor,
+  });
+
+  final String label;
+  final Color backgroundColor;
+  final Color foregroundColor;
+
+  @override
+  Widget build(BuildContext context) {
+    return DecoratedBox(
+      decoration: BoxDecoration(
+        color: backgroundColor,
+        borderRadius: BorderRadius.circular(999),
+      ),
+      child: Padding(
+        padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 5),
+        child: Text(
+          label,
+          style: TextStyle(
+            color: foregroundColor,
+            fontWeight: FontWeight.w600,
+          ),
+        ),
+      ),
+    );
+  }
+}
+
+class _StateChip extends StatelessWidget {
+  const _StateChip({required this.name, required this.value});
+
+  final String name;
+  final _AttributeValue value;
+
+  @override
+  Widget build(BuildContext context) {
+    return DecoratedBox(
+      decoration: BoxDecoration(
+        color: const Color(0xFFEFF4F2),
+        borderRadius: BorderRadius.circular(8),
+        border: Border.all(color: const Color(0xFFD8E1DD)),
+      ),
+      child: Padding(
+        padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 8),
+        child: Column(
+          crossAxisAlignment: CrossAxisAlignment.start,
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            Text(
+              name,
+              style: Theme.of(context).textTheme.labelMedium?.copyWith(
+                    color: Theme.of(context).colorScheme.onSurfaceVariant,
+                  ),
+            ),
+            const SizedBox(height: 2),
+            Text(
+              value.displayValue,
+              style: Theme.of(context).textTheme.bodyMedium?.copyWith(
+                    fontWeight: FontWeight.w600,
+                  ),
+            ),
+          ],
+        ),
+      ),
     );
   }
 }
@@ -792,6 +1512,309 @@ class _LogEntry {
   final DateTime timestamp;
   final String text;
   final String? messageType;
+}
+
+class _ChunkAccumulator<T> {
+  _ChunkAccumulator({required this.generation});
+
+  int generation;
+  final Map<int, List<T>> chunks = {};
+  int? finalIndex;
+}
+
+class _InventoryDevice {
+  const _InventoryDevice({
+    required this.deviceId,
+    required this.name,
+    required this.manufacturer,
+    required this.model,
+    required this.powerSource,
+    required this.capabilities,
+  });
+
+  factory _InventoryDevice.fromJson(Map<String, dynamic> json) {
+    final deviceId = json['device_id'];
+    if (deviceId is! String || deviceId.isEmpty) {
+      return _InventoryDevice.placeholder('unknown-device');
+    }
+
+    final capabilities = json['capabilities'] is List
+        ? (json['capabilities'] as List)
+            .map((item) => item.toString())
+            .where((item) => item.isNotEmpty)
+            .toList(growable: false)
+        : const <String>[];
+
+    return _InventoryDevice(
+      deviceId: deviceId,
+      name: (json['name'] as String?)?.trim().isNotEmpty == true
+          ? (json['name'] as String).trim()
+          : deviceId,
+      manufacturer: (json['manufacturer'] as String?)?.trim() ?? 'Unknown',
+      model: (json['model'] as String?)?.trim() ?? 'Unknown',
+      powerSource: (json['power_source'] as String?)?.trim() ?? 'unknown',
+      capabilities: capabilities,
+    );
+  }
+
+  factory _InventoryDevice.placeholder(String deviceId) {
+    return _InventoryDevice(
+      deviceId: deviceId,
+      name: deviceId,
+      manufacturer: 'Unknown',
+      model: 'Unknown',
+      powerSource: 'unknown',
+      capabilities: const [],
+    );
+  }
+
+  final String deviceId;
+  final String name;
+  final String manufacturer;
+  final String model;
+  final String powerSource;
+  final List<String> capabilities;
+
+  _InventoryDevice copyWith({String? name}) {
+    return _InventoryDevice(
+      deviceId: deviceId,
+      name: (name?.trim().isNotEmpty == true) ? name!.trim() : this.name,
+      manufacturer: manufacturer,
+      model: model,
+      powerSource: powerSource,
+      capabilities: capabilities,
+    );
+  }
+}
+
+class _StateDeviceSnapshot {
+  const _StateDeviceSnapshot({
+    required this.deviceId,
+    required this.meta,
+    required this.state,
+  });
+
+  factory _StateDeviceSnapshot.empty(String deviceId) {
+    return _StateDeviceSnapshot(
+      deviceId: deviceId,
+      meta: const _DeviceMetaState(),
+      state: const {},
+    );
+  }
+
+  factory _StateDeviceSnapshot.fromJson(Map<String, dynamic> json) {
+    final deviceId = json['device_id'];
+    if (deviceId is! String || deviceId.isEmpty) {
+      return _StateDeviceSnapshot.empty('unknown-device');
+    }
+
+    final rawState = json['state'];
+    final state = <String, _AttributeValue>{};
+    if (rawState is Map) {
+      for (final entry in rawState.entries) {
+        state[entry.key.toString()] = _AttributeValue.fromJson(
+          entry.value is Map
+              ? entry.value.map(
+                  (key, value) => MapEntry(key.toString(), value),
+                )
+              : null,
+        );
+      }
+    }
+
+    return _StateDeviceSnapshot(
+      deviceId: deviceId,
+      meta: _DeviceMetaState.fromJson(
+        json['meta'] is Map
+            ? (json['meta'] as Map).map(
+                (key, value) => MapEntry(key.toString(), value),
+              )
+            : null,
+      ),
+      state: state,
+    );
+  }
+
+  final String deviceId;
+  final _DeviceMetaState meta;
+  final Map<String, _AttributeValue> state;
+
+  _StateDeviceSnapshot copyWith({
+    _DeviceMetaState? meta,
+    Map<String, _AttributeValue>? state,
+  }) {
+    return _StateDeviceSnapshot(
+      deviceId: deviceId,
+      meta: meta ?? this.meta,
+      state: state ?? this.state,
+    );
+  }
+}
+
+class _DeviceMetaState {
+  const _DeviceMetaState({
+    this.reachable,
+    this.lastSeen,
+    this.linkQuality,
+  });
+
+  factory _DeviceMetaState.fromJson(Map<String, dynamic>? json) {
+    if (json == null) {
+      return const _DeviceMetaState();
+    }
+
+    return _DeviceMetaState(
+      reachable: json['reachable'] is bool ? json['reachable'] as bool : null,
+      lastSeen: json['last_seen'] is num ? (json['last_seen'] as num).toInt() : null,
+      linkQuality: json['link_quality'] is num
+          ? (json['link_quality'] as num).toInt()
+          : null,
+    );
+  }
+
+  final bool? reachable;
+  final int? lastSeen;
+  final int? linkQuality;
+
+  _DeviceMetaState copyWith({
+    bool? reachable,
+    int? lastSeen,
+    int? linkQuality,
+  }) {
+    return _DeviceMetaState(
+      reachable: reachable ?? this.reachable,
+      lastSeen: lastSeen ?? this.lastSeen,
+      linkQuality: linkQuality ?? this.linkQuality,
+    );
+  }
+}
+
+class _AttributeValue {
+  const _AttributeValue({
+    required this.value,
+    this.unit,
+    this.ts,
+    this.quality,
+  });
+
+  factory _AttributeValue.fromJson(Map<String, dynamic>? json) {
+    if (json == null) {
+      return const _AttributeValue(value: null);
+    }
+
+    return _AttributeValue(
+      value: json['value'],
+      unit: json['unit'] as String?,
+      ts: json['ts'] is num ? (json['ts'] as num).toInt() : null,
+      quality: json['quality'] as String?,
+    );
+  }
+
+  final Object? value;
+  final String? unit;
+  final int? ts;
+  final String? quality;
+
+  bool? get boolValue {
+    final current = value;
+    if (current is bool) {
+      return current;
+    }
+    if (current is String) {
+      if (current.toUpperCase() == 'ON') {
+        return true;
+      }
+      if (current.toUpperCase() == 'OFF') {
+        return false;
+      }
+    }
+    if (current is num) {
+      return current != 0;
+    }
+    return null;
+  }
+
+  String get displayValue {
+    final current = value;
+    final rendered = switch (current) {
+      null => 'sin dato',
+      final bool flag => flag ? 'true' : 'false',
+      _ => current.toString(),
+    };
+
+    if (unit == null || unit!.isEmpty) {
+      return rendered;
+    }
+    return '$rendered $unit';
+  }
+}
+
+class _PendingDeviceCommand {
+  const _PendingDeviceCommand({
+    required this.msgId,
+    required this.deviceId,
+    required this.desiredState,
+    required this.previousState,
+  });
+
+  final int msgId;
+  final String deviceId;
+  final bool desiredState;
+  final bool? previousState;
+}
+
+class _TrackedDevice {
+  const _TrackedDevice({
+    required this.deviceId,
+    required this.inventory,
+    required this.snapshot,
+    required this.pendingCommand,
+  });
+
+  final String deviceId;
+  final _InventoryDevice? inventory;
+  final _StateDeviceSnapshot? snapshot;
+  final _PendingDeviceCommand? pendingCommand;
+
+  String get name => inventory?.name ?? deviceId;
+
+  String get subtitle =>
+      '${inventory?.manufacturer ?? 'Unknown'} · ${inventory?.model ?? 'Unknown'} · '
+      '${inventory?.powerSource ?? 'unknown'}';
+
+  List<String> get capabilities => inventory?.capabilities ?? const [];
+
+  bool get supportsSwitch => capabilities.contains('switch');
+
+  bool? get isReachable => snapshot?.meta.reachable;
+
+  String get reachableLabel => switch (snapshot?.meta.reachable) {
+        true => 'Online',
+        false => 'Offline',
+        null => 'Sin reachability',
+      };
+
+  bool? get switchValue =>
+      pendingCommand?.desiredState ?? snapshot?.state['state']?.boolValue;
+
+  String get metaSummary {
+    final parts = <String>[];
+    final lastSeen = snapshot?.meta.lastSeen;
+    final lqi = snapshot?.meta.linkQuality;
+    if (lastSeen != null) {
+      parts.add('last_seen: ${lastSeen}s');
+    }
+    if (lqi != null) {
+      parts.add('lqi: $lqi');
+    }
+    return parts.join(' · ');
+  }
+
+  List<MapEntry<String, _AttributeValue>> get stateEntries {
+    final entries = snapshot?.state.entries.toList() ?? const [];
+    entries.sort((left, right) => left.key.compareTo(right.key));
+    return entries;
+  }
 }
 
 enum _LogDirection { rx, tx, system, error }

@@ -360,3 +360,25 @@ Flashear con argumentos adicionales:
 ```
 
 Salir del monitor: `Ctrl+]`
+
+---
+
+## Plugin Homebridge
+
+El plugin de Homebridge vive en una carpeta separada del firmware:
+
+- [homebridge-plugin/README.md](/c:/projects/esp32_zigbee3/homebridge-plugin/README.md)
+
+Se apoya en el protocolo WebSocket documentado en:
+
+- [docs/protocolo_websocket_esp32_homebridge_v2.docx](/c:/projects/esp32_zigbee3/docs/protocolo_websocket_esp32_homebridge_v2.docx)
+
+Objetivo del paquete:
+
+- conectar Homebridge como cliente WebSocket al ESP32
+- descubrir accesorios desde `inventory_chunk`
+- mantener estado y reachability desde `state_chunk` y `event`
+- traducir comandos HomeKit hacia `cmd`
+
+El plugin se ha separado a nivel de repo para no mezclar dependencias Node/Homebridge
+con el firmware ESP-IDF.

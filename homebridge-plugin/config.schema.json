@@ -1,0 +1,68 @@
+{
+  "pluginAlias": "ESP32ZigbeeBridge",
+  "pluginType": "platform",
+  "singular": false,
+  "headerDisplay": "Plugin de Homebridge para el gateway Zigbee ESP32 por WebSocket. Descubre accesorios desde `inventory_chunk`, mantiene reachability y sensores con `event`, y hoy controla de forma nativa solo `on/off` porque el firmware actual no expone aun brillo u otras escrituras por WebSocket.",
+  "schema": {
+    "type": "object",
+    "properties": {
+      "name": {
+        "title": "Nombre de la plataforma",
+        "type": "string",
+        "default": "ESP32 Zigbee Bridge",
+        "required": true
+      },
+      "url": {
+        "title": "WebSocket URL",
+        "type": "string",
+        "placeholder": "ws://esp32-zigbee.local:8080/ws"
+      },
+      "host": {
+        "title": "Host o mDNS",
+        "type": "string",
+        "placeholder": "esp32-zigbee.local"
+      },
+      "port": {
+        "title": "Puerto",
+        "type": "integer",
+        "default": 8080
+      },
+      "path": {
+        "title": "Ruta",
+        "type": "string",
+        "default": "/ws"
+      },
+      "tls": {
+        "title": "Usar WSS",
+        "type": "boolean",
+        "default": false
+      },
+      "pingIntervalSeconds": {
+        "title": "Heartbeat (segundos)",
+        "type": "integer",
+        "default": 25
+      },
+      "reconnectDelaySeconds": {
+        "title": "Reconexion (segundos)",
+        "type": "integer",
+        "default": 5
+      },
+      "commandTimeoutSeconds": {
+        "title": "Timeout de comandos (segundos)",
+        "type": "integer",
+        "default": 10
+      }
+    }
+  },
+  "form": [
+    "name",
+    "url",
+    "host",
+    "port",
+    "path",
+    "tls",
+    "pingIntervalSeconds",
+    "reconnectDelaySeconds",
+    "commandTimeoutSeconds"
+  ]
+}

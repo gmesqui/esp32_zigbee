@@ -7,10 +7,11 @@ void main() {
     await tester.pumpWidget(const HomebridgeSimulatorApp());
 
     expect(find.text('Homebridge WS Simulator'), findsOneWidget);
-    expect(find.text('ESP32-zigbee.local'), findsOneWidget);
+    expect(find.text('esp32-zigbee.local'), findsOneWidget);
     expect(find.text('Conectar'), findsOneWidget);
     expect(find.text('Mensajes WS'), findsOneWidget);
     expect(find.text('Enviar JSON'), findsOneWidget);
+    expect(find.text('Dispositivos'), findsOneWidget);
     expect(find.byIcon(Icons.send_outlined), findsOneWidget);
   });
 }

@@ -22,3 +22,7 @@ Thumbs.db
 
 # Claude Code internal files
 .claude/
+
+# Homebridge plugin workspace
+homebridge-plugin/node_modules/
+homebridge-plugin/dist/
