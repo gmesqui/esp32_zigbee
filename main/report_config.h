@@ -25,6 +25,12 @@ size_t rc_configure_device(device_record_t *dev);
 /** Schedule configure-reporting from a non-Zigbee task. */
 void rc_configure_device_async(device_record_t *dev);
 
+/** Effective max_interval policy applied by the coordinator for reporting. */
+uint16_t rc_effective_max_interval(bool is_sleepy);
+
+/** Presence timeout derived from reporting max_interval plus a safety margin. */
+uint32_t rc_presence_timeout_ms(bool is_sleepy);
+
 typedef struct {
     uint16_t cluster_id;
     uint16_t attr_id;
@@ -60,3 +66,8 @@ void rc_write_ias_cie_address(uint16_t nwk_addr, uint8_t endpoint);
 // Coordinator endpoint used as source in all outgoing ZCL commands.
 // ---------------------------------------------------------------------------
 #define COORD_ENDPOINT  1
+
+// Presence timeout must never be tighter than the reporting max_interval.
+// Add extra slack beyond the 10 s maintenance cadence to avoid premature
+// offline transitions near the reporting boundary.
+#define REPORT_CFG_PRESENCE_GRACE_S 20u

@@ -1,4 +1,5 @@
 #include "device_manager.h"
+#include "report_config.h"
 #include "zb_events.h"
 #include "utils.h"
 #include <string.h>
@@ -269,11 +270,6 @@ uint16_t dm_slot_generation(uint8_t idx)
 // Presence check
 // ---------------------------------------------------------------------------
 
-// Offline thresholds for inactivity-based presence fallback.
-// Shorter values make stale availability decay faster when no stack signal arrives.
-#define OFFLINE_THRESHOLD_ALWAYS_ON_MS  (300u  * 1000u)
-#define OFFLINE_THRESHOLD_SLEEPY_MS     (3600u * 1000u)
-
 void dm_check_presence(void)
 {
     uint32_t now = utils_uptime_ms();
@@ -282,9 +278,7 @@ void dm_check_presence(void)
         if (!d->in_use || !d->online) continue;
         if (d->last_seen_ms == 0) continue;
 
-        uint32_t threshold = d->is_sleepy
-            ? OFFLINE_THRESHOLD_SLEEPY_MS
-            : OFFLINE_THRESHOLD_ALWAYS_ON_MS;
+        uint32_t threshold = rc_presence_timeout_ms(d->is_sleepy);
 
         if ((now - d->last_seen_ms) > threshold) {
             d->online = false;

@@ -294,8 +294,12 @@ Cada `10 s`, `maintenance_alarm()` ejecuta:
 
 `dm_check_presence()` usa umbrales fijos:
 
-- always-on: `300 s`
-- sleepy: `3600 s`
+- always-on: `320 s`
+- sleepy: `3620 s`
+
+La regla es:
+
+- `presence_timeout = max_interval_reporting_efectivo + 20 s`
 
 Si se supera ese tiempo desde `last_seen_ms`, se marca offline por inactividad.
 
@@ -1023,8 +1027,8 @@ Esto desacopla la logica Zigbee del transporte de publicacion.
 ## Tiempos y valores importantes
 
 - mantenimiento periodico: `10 s`
-- timeout de presencia always-on: `300 s`
-- timeout de presencia sleepy: `3600 s`
+- timeout de presencia always-on: `320 s`
+- timeout de presencia sleepy: `3620 s`
 - arranque del siguiente paso de entrevista: tipicamente `200 ms`
 - espera tras `READ_BASIC`: `1500 ms`
 - espera tras `READ_POWER_CFG`: `1000 ms`

@@ -63,10 +63,16 @@ typedef struct {
 
 static read_report_cfg_req_t s_read_report_cfg_queue[READ_REPORT_CFG_QUEUE_LEN];
 
-static uint16_t rc_effective_max_interval(bool is_sleepy)
+uint16_t rc_effective_max_interval(bool is_sleepy)
 {
     return is_sleepy ? REPORT_CFG_MAX_INTERVAL_SLEEPY_S
                      : REPORT_CFG_MAX_INTERVAL_ALWAYS_ON_S;
+}
+
+uint32_t rc_presence_timeout_ms(bool is_sleepy)
+{
+    uint32_t max_interval_s = rc_effective_max_interval(is_sleepy);
+    return (max_interval_s + REPORT_CFG_PRESENCE_GRACE_S) * 1000u;
 }
 
 static void rc_configure_device_alarm(uint8_t dev_idx)
