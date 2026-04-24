@@ -5,6 +5,8 @@
 #include "nvs_cache.h"
 #include "utils.h"
 #include <string.h>
+
+#define DI_ZB_LOCK_WAIT_MS 1000u
 #include <stdio.h>
 #include "esp_zigbee_core.h"
 #include "freertos/FreeRTOS.h"
@@ -661,6 +663,18 @@ void di_enqueue(device_record_t *dev)
             ZB_LOG("INTERVIEW queue full, dropping %s", dm_display_name(dev));
         }
     }
+}
+
+bool di_enqueue_async(device_record_t *dev)
+{
+    if (!esp_zb_lock_acquire(pdMS_TO_TICKS(DI_ZB_LOCK_WAIT_MS))) {
+        ZB_LOG("INTERVIEW lock timeout");
+        return false;
+    }
+
+    di_enqueue(dev);
+    esp_zb_lock_release();
+    return true;
 }
 
 void di_on_reporting_config_response(device_record_t *dev)

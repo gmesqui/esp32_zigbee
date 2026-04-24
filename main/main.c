@@ -1,4 +1,5 @@
 #include <stdio.h>
+#include "board_config.h"
 #include "nvs_flash.h"
 #include "nvs.h"
 #include "utils.h"
@@ -32,7 +33,7 @@ void app_main(void)
     }
     ESP_ERROR_CHECK(err);
 
-    ZB_LOG("=== ESP32-C5 Zigbee Coordinator booting ===");
+    ZB_LOG("=== %s Zigbee Coordinator booting (%s) ===", BOARD_SOC_NAME, BOARD_NAME);
     ZB_LOG("Build: " __DATE__ " " __TIME__);
 
     // 2. Zigbee event bus (neutral layer; must be before any emitters or consumers)

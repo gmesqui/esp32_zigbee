@@ -7,12 +7,14 @@
 #include "report_config.h"
 #include "utils.h"
 
+#include "freertos/FreeRTOS.h"
 #include "esp_zigbee_core.h"
 #include "zcl/esp_zigbee_zcl_command.h"
 #include "zcl/esp_zigbee_zcl_on_off.h"
 #include <string.h>
 
 #define CLIENT_ZB_OP_MAX 16
+#define CLIENT_ZB_LOCK_WAIT_MS 1000
 
 typedef enum {
     CLIENT_ZB_OP_NONE = 0,
@@ -40,6 +42,16 @@ typedef struct {
 } attr_name_map_t;
 
 static client_zb_op_t s_zb_ops[CLIENT_ZB_OP_MAX];
+
+static bool zb_lock_for_client_api(void)
+{
+    if (esp_zb_lock_acquire(pdMS_TO_TICKS(CLIENT_ZB_LOCK_WAIT_MS))) {
+        return true;
+    }
+
+    ZB_LOG("CLIENT Zigbee lock timeout");
+    return false;
+}
 
 static const attr_name_map_t k_attr_name_map[] = {
     { "state",       0x0006, 0x0000 },
@@ -131,15 +143,21 @@ static bool schedule_zb_op(const client_zb_op_t *op, uint32_t delay_ms)
         return false;
     }
 
+    if (!zb_lock_for_client_api()) {
+        return false;
+    }
+
     for (int idx = 0; idx < CLIENT_ZB_OP_MAX; idx++) {
         if (!s_zb_ops[idx].in_use) {
             s_zb_ops[idx] = *op;
             s_zb_ops[idx].in_use = true;
             esp_zb_scheduler_alarm(client_zb_op_alarm, (uint8_t)idx, delay_ms);
+            esp_zb_lock_release();
             return true;
         }
     }
 
+    esp_zb_lock_release();
     return false;
 }
 
@@ -356,8 +374,7 @@ client_action_result_t client_actions_interview_device(const char *device_id)
     }
 
     dev->state = DEV_STATE_NEW;
-    di_enqueue(dev);
-    return CLIENT_ACTION_OK;
+    return di_enqueue_async(dev) ? CLIENT_ACTION_OK : CLIENT_ACTION_BUSY;
 }
 
 client_action_result_t client_actions_configure_device(const char *device_id)
@@ -406,4 +423,3 @@ client_action_result_t client_actions_rename_device(const char *from_id,
 
     return CLIENT_ACTION_OK;
 }
-

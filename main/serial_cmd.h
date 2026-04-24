@@ -3,7 +3,11 @@
 // ---------------------------------------------------------------------------
 // Serial command handler.
 //
-// Reads single keystrokes from UART0 and executes diagnostic commands.
+// Reads single keystrokes from the active ESP-IDF console channel and executes
+// diagnostic commands.
+//
+// - ESP32-C5: UART0
+// - ESP32-C6: native USB Serial/JTAG
 //
 // Key map:
 //   '1' - Plain-text dump of all devices
@@ -18,5 +22,5 @@
 //   '?' - Print key map
 // ---------------------------------------------------------------------------
 
-/** Initialise UART and start the serial_cmd_task. Call once from app_main. */
+/** Initialise the active console input driver and start serial_cmd_task. */
 void serial_cmd_init(void);

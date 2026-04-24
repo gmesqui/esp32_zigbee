@@ -9,6 +9,7 @@
 #include <cJSON.h>
 #include <stdbool.h>
 #include <stdio.h>
+#include <stdlib.h>
 #include <string.h>
 
 typedef enum {
@@ -30,6 +31,26 @@ typedef struct {
 
 typedef bool (*ws_device_item_writer_t)(char *buf, size_t buf_len,
                                         const device_record_t *dev);
+
+typedef struct {
+    char *prefix;
+    char *items;
+    char *chunk;
+    char *item;
+} ws_stream_buffers_t;
+
+static void free_stream_buffers(ws_stream_buffers_t *bufs)
+{
+    if (!bufs) {
+        return;
+    }
+
+    free(bufs->prefix);
+    free(bufs->items);
+    free(bufs->chunk);
+    free(bufs->item);
+    memset(bufs, 0, sizeof(*bufs));
+}
 
 static uint32_t next_msg_id(void)
 {
@@ -226,35 +247,44 @@ static bool emit_device_stream(const char *message_type, const char *stream_pref
            (unsigned)WS_PROTOCOL_MAX_MESSAGE,
            (unsigned)WS_PROTOCOL_ITEM_BUFFER);
 
+    ws_stream_buffers_t bufs = {
+        .prefix = calloc(1u, 192u),
+        .items = calloc(1u, WS_PROTOCOL_MAX_MESSAGE),
+        .chunk = calloc(1u, WS_PROTOCOL_MAX_MESSAGE),
+        .item = calloc(1u, WS_PROTOCOL_ITEM_BUFFER),
+    };
+
+    if (!bufs.prefix || !bufs.items || !bufs.chunk || !bufs.item) {
+        free_stream_buffers(&bufs);
+        ZB_LOG("WS stream %s alloc failed", message_type);
+        return false;
+    }
+
     dm_lock();
     while (true) {
         uint8_t idx = 0;
         if (!has_interviewed_device_from(next_idx, &idx)) {
-            char prefix[192];
-            char chunk[WS_PROTOCOL_MAX_MESSAGE];
-            build_chunk_prefix(prefix, sizeof(prefix), message_type, stream_id,
+            build_chunk_prefix(bufs.prefix, 192u, message_type, stream_id,
                                generation, chunk_idx);
-            build_chunk(chunk, sizeof(chunk), prefix, true, "");
+            build_chunk(bufs.chunk, WS_PROTOCOL_MAX_MESSAGE, bufs.prefix, true, "");
             dm_unlock();
             ZB_LOG("WS stream %s chunk=%lu bytes=%u items=0 final=1",
                    message_type, (unsigned long)chunk_idx,
-                   (unsigned)json_len(chunk));
-            ok = send_text(send_fn, ctx, chunk) && ok;
+                   (unsigned)json_len(bufs.chunk));
+            ok = send_text(send_fn, ctx, bufs.chunk) && ok;
             ZB_LOG("WS stream %s end chunks=%lu items=%lu ok=%u",
                    message_type, (unsigned long)(chunk_idx + 1u),
                    (unsigned long)item_count, ok ? 1u : 0u);
+            free_stream_buffers(&bufs);
             return ok;
         }
 
-        char prefix[192];
-        char items[WS_PROTOCOL_MAX_MESSAGE];
-        char chunk[WS_PROTOCOL_MAX_MESSAGE];
         size_t item_len = 0;
         uint32_t chunk_items = 0;
 
-        build_chunk_prefix(prefix, sizeof(prefix), message_type, stream_id,
+        build_chunk_prefix(bufs.prefix, 192u, message_type, stream_id,
                            generation, chunk_idx);
-        items[0] = '\0';
+        bufs.items[0] = '\0';
 
         for (; idx < MAX_DEVICES; idx++) {
             device_record_t *dev = dm_get_by_index(idx);
@@ -262,18 +292,17 @@ static bool emit_device_stream(const char *message_type, const char *stream_pref
                 continue;
             }
 
-            char item[WS_PROTOCOL_ITEM_BUFFER];
-            if (!write_item(item, sizeof(item), dev)) {
+            if (!write_item(bufs.item, WS_PROTOCOL_ITEM_BUFFER, dev)) {
                 char id[20];
                 utils_ieee_to_str(dev->ieee_addr, id, sizeof(id));
                 ZB_LOG("WS stream %s skip oversized item device=%s item_buf=%u",
-                       message_type, id, (unsigned)sizeof(item));
+                       message_type, id, (unsigned)WS_PROTOCOL_ITEM_BUFFER);
                 next_idx = (uint8_t)(idx + 1u);
                 continue;
             }
 
-            item_len = strlen(item);
-            size_t needed = strlen(prefix) + strlen(items) + item_len +
+            item_len = strlen(bufs.item);
+            size_t needed = strlen(bufs.prefix) + strlen(bufs.items) + item_len +
                             (chunk_items > 0 ? 1u : 0u) +
                             strlen("false,\"devices\":[]}}") +
                             WS_PROTOCOL_CHUNK_MARGIN;
@@ -283,34 +312,39 @@ static bool emit_device_stream(const char *message_type, const char *stream_pref
             }
 
             if (chunk_items > 0) {
-                strncat(items, ",", sizeof(items) - strlen(items) - 1u);
+                strncat(bufs.items, ",",
+                        WS_PROTOCOL_MAX_MESSAGE - strlen(bufs.items) - 1u);
             }
-            strncat(items, item, sizeof(items) - strlen(items) - 1u);
+            strncat(bufs.items, bufs.item,
+                    WS_PROTOCOL_MAX_MESSAGE - strlen(bufs.items) - 1u);
             chunk_items++;
             item_count++;
             next_idx = (uint8_t)(idx + 1u);
         }
 
         bool final = !has_interviewed_device_from(next_idx, NULL);
-        build_chunk(chunk, sizeof(chunk), prefix, final, items);
+        build_chunk(bufs.chunk, WS_PROTOCOL_MAX_MESSAGE, bufs.prefix, final,
+                    bufs.items);
         dm_unlock();
 
-        size_t chunk_len = json_len(chunk);
+        size_t chunk_len = json_len(bufs.chunk);
         ZB_LOG("WS stream %s chunk=%lu bytes=%u items=%lu final=%u",
                message_type, (unsigned long)chunk_idx, (unsigned)chunk_len,
                (unsigned long)chunk_items, final ? 1u : 0u);
 
         if (chunk_len >= WS_PROTOCOL_MAX_MESSAGE - 1u) {
             ZB_LOG("WS stream %s chunk overflow, aborting", message_type);
+            free_stream_buffers(&bufs);
             return false;
         }
 
-        ok = send_text(send_fn, ctx, chunk) && ok;
+        ok = send_text(send_fn, ctx, bufs.chunk) && ok;
 
         if (final) {
             ZB_LOG("WS stream %s end chunks=%lu items=%lu ok=%u",
                    message_type, (unsigned long)(chunk_idx + 1u),
                    (unsigned long)item_count, ok ? 1u : 0u);
+            free_stream_buffers(&bufs);
             return ok;
         }
 

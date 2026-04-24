@@ -1,15 +1,17 @@
-# ESP32-C5 Zigbee Coordinator
+# ESP32-C5 / ESP32-C6 Zigbee Coordinator
 
-Coordinador Zigbee completo para `ESP32-C5-KITC-A V1.2` con `ESP-IDF` y `ESP Zigbee SDK`.
+Coordinador Zigbee completo para `ESP32-C5-KITC-A V1.2` y `ESP32-C6 Super Mini` con `ESP-IDF` y `ESP Zigbee SDK`.
 
-## Hardware objetivo
+## Hardware soportado
 
-- SoC: **ESP32-C5**, radio nativa 2.4 GHz IEEE 802.15.4
-- Flash: 4 MiB
+| Placa | Target ESP-IDF | Radio | Flash | LED RGB | Boton permit-join |
+|-------|----------------|-------|-------|---------|-------------------|
+| `ESP32-C5-KITC-A V1.2` | `esp32c5` | IEEE 802.15.4 nativa 2.4 GHz | 4 MiB | WS2812 GPIO 27 | GPIO 28 |
+| `ESP32-C6 Super Mini` | `esp32c6` | IEEE 802.15.4 nativa 2.4 GHz | 4 MiB | WS2812 GPIO 8 | GPIO 9 |
+
 - Ethernet: W5500 por SPI (`SPI2_HOST`)
-- LED RGB: WS2812 en GPIO 27
-- Boton BOOT: GPIO 28 (permit-join)
-- UART0: 115200 baud (monitor serie)
+- Consola: UART0 115200 baud en C5; USB Serial/JTAG nativo por USB-C en C6 Super Mini.
+- La seleccion de pines se hace en `main/board_config.h` usando `CONFIG_IDF_TARGET`.
 
 ---
 
@@ -53,20 +55,21 @@ app_main()
 | `zigbee_main` | 5 | Loop principal del stack Zigbee |
 | `btn_task` | 3 | Procesador de eventos de boton |
 | `led_task` | 2 | Animacion LED @ 50 Hz |
-| `serial_cmd_task` | 1 | Listener UART0 |
+| `serial_cmd_task` | 1 | Listener consola activa (`UART0` en C5, `USB Serial/JTAG` en C6) |
 
 ### Ficheros fuente
 
 | Fichero | Responsabilidad |
 |---------|----------------|
 | `main.c` | Punto de entrada, secuencia de inicializacion |
+| `board_config.h` | Seleccion de placa, pines de LED/boton/Ethernet y nombre de hardware por target ESP-IDF |
 | `zigbee_core.c/h` | Init coordinador, manejador de senales BDB/ZDO, manejador de acciones ZCL, alarmas de mantenimiento |
 | `device_manager.c/h` | Tabla RAM thread-safe (max 32 dispositivos), ciclo de vida, lookups por IEEE/NWK |
 | `device_interview.c/h` | Maquina de estados de entrevista (7 pasos), cola FIFO, callbacks ZDO, resolucion IEEE |
 | `zcl_handler.c/h` | Decodificacion de Report Attributes y Read Attribute Responses, cache con deteccion de cambios |
 | `report_config.c/h` | Envio de Configure Reporting tras entrevista (13 clusters), respuesta IAS enrollment |
 | `nvs_cache.c/h` | Serializacion/deserializacion binaria de dispositivos en NVS, escrituras lazy por bandera dirty |
-| `serial_cmd.c/h` | Comandos interactivos por UART0 (teclas 1–5, n, j, r, e, ?) |
+| `serial_cmd.c/h` | Comandos interactivos por consola activa (teclas 1–5, g, w, n, j, r, e, ?) |
 | `led_driver.c/h` | Control WS2812: onda seno verde-azul base, overlay rojo permit-join, overlay blanco actividad |
 | `button_handler.c/h` | ISR con antirebote 200 ms, toggle permit-join 180 s |
 | `utils.c/h` | Uptime ms/s, IEEE→string, nombres de cluster/device-type, macro `ZB_LOG` con timestamp |
@@ -164,7 +167,7 @@ app_main()
 
 > Si ves `ESP_ERR_NVS_NOT_ENOUGH_SPACE` al guardar `dt3_d31`, no reduzcas la particion `nvs` (actualmente 128 KiB).
 
-### LED WS2812 (GPIO 27)
+### LED WS2812
 
 | Estado | Patron |
 |--------|--------|
@@ -172,28 +175,33 @@ app_main()
 | Permit-join abierto | Overlay rojo pulsante, periodo 1 s |
 | Actividad ZCL | Flash blanco 100 ms con decay |
 
-### Boton BOOT (GPIO 28)
+### Boton BOOT
 
 - Pulsacion corta: abre permit-join 180 s (o cierra si ya estaba abierto)
 - Antirebote hardware: 200 ms
 
 ### Patillaje Ethernet (W5500 por SPI)
 
-| Senal | GPIO | Notas |
-|-------|------|-------|
-| `MOSI` | 4 | SPI hacia el W5500 |
-| `MISO` | 5 | SPI desde el W5500 |
-| `SCLK` | 6 | Reloj SPI |
-| `CS` | 23 | Chip select del W5500 |
-| `INT` | 24 | Interrupcion del W5500 |
-| `RST` | 25 | Reset del W5500 |
+| Senal | ESP32-C5 GPIO | ESP32-C6 GPIO | Notas |
+|-------|---------------|---------------|-------|
+| `MOSI` | 4 | 2 | SPI hacia el W5500 |
+| `MISO` | 5 | 3 | SPI desde el W5500 |
+| `SCLK` | 6 | 6 | Reloj SPI |
+| `CS` | 23 | 7 | Chip select del W5500 |
+| `INT` | 24 | 18 | Interrupcion del W5500 |
+| `RST` | 25 | 14 | Reset del W5500 |
 
 - Host SPI usado: `SPI2_HOST`
 - Frecuencia SPI configurada: `20 MHz`
 
 ---
 
-## Comandos serie (UART0)
+## Comandos serie
+
+Canal interactivo segun target:
+
+- `ESP32-C5`: `UART0` a `115200`
+- `ESP32-C6`: `USB Serial/JTAG` nativo por USB-C
 
 | Tecla | Accion |
 |-------|--------|
@@ -299,14 +307,14 @@ Comportamiento ante informes repetidos: `last_seen_s` se actualiza siempre; `rep
 | `OFFLINE_THRESHOLD_SLEEPY_MS` | 10 920 000 | ~3 h |
 | `PERMIT_JOIN_SECS` | 180 | Ventana abierta por boton |
 | `DEBOUNCE_MS` | 200 | Antirebote boton |
-| `LED_STRIP_GPIO` | 27 | GPIO WS2812 |
-| `BOOT_BUTTON_GPIO` | 28 | GPIO boton BOOT |
-| `ETH_MOSI_GPIO` | 4 | SPI MOSI hacia W5500 |
-| `ETH_MISO_GPIO` | 5 | SPI MISO desde W5500 |
-| `ETH_SCLK_GPIO` | 6 | SPI clock W5500 |
-| `ETH_CS_GPIO` | 23 | Chip select W5500 |
-| `ETH_INT_GPIO` | 24 | Interrupcion W5500 |
-| `ETH_RST_GPIO` | 25 | Reset W5500 |
+| `LED_STRIP_GPIO` | C5: 27, C6: 8 | GPIO WS2812 |
+| `BOOT_BUTTON_GPIO` | C5: 28, C6: 9 | GPIO boton BOOT |
+| `ETH_MOSI_GPIO` | C5: 4, C6: 2 | SPI MOSI hacia W5500 |
+| `ETH_MISO_GPIO` | C5: 5, C6: 3 | SPI MISO desde W5500 |
+| `ETH_SCLK_GPIO` | C5: 6, C6: 6 | SPI clock W5500 |
+| `ETH_CS_GPIO` | C5: 23, C6: 7 | Chip select W5500 |
+| `ETH_INT_GPIO` | C5: 24, C6: 18 | Interrupcion W5500 |
+| `ETH_RST_GPIO` | C5: 25, C6: 14 | Reset W5500 |
 | `ETH_SPI_CLOCK_HZ` | 20 000 000 | SPI Ethernet a 20 MHz |
 | `NVS_CACHE_VERSION` | 3 | Version de esquema NVS |
 
@@ -336,10 +344,21 @@ En PowerShell:
 
 ## Compilar
 
+Para ESP32-C5:
+
 ```powershell
 idf.py set-target esp32c5
 idf.py build
 ```
+
+Para ESP32-C6:
+
+```powershell
+idf.py set-target esp32c6
+idf.py build
+```
+
+`sdkconfig.defaults` contiene la configuracion comun, y `sdkconfig.defaults.esp32c5` / `sdkconfig.defaults.esp32c6` contienen los ajustes especificos de cada target.
 
 ## Flashear y monitorizar
 
@@ -356,8 +375,10 @@ Solo monitorizar:
 Flashear con argumentos adicionales:
 
 ```powershell
-.\idf-with-com3.ps1 flash monitor
+.\idf-with-com7.ps1 flash monitor
 ```
+
+En ESP32-C6 Super Mini, usa el puerto COM del USB-C nativo de la placa; `sdkconfig.defaults.esp32c6` deja la consola en USB Serial/JTAG.
 
 Salir del monitor: `Ctrl+]`
 

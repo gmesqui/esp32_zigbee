@@ -10,6 +10,7 @@
 #include "freertos/semphr.h"
 #include "freertos/task.h"
 #include <stdio.h>
+#include <stdlib.h>
 #include <string.h>
 
 #define WS_URI             "/ws"
@@ -23,6 +24,7 @@
 #define WS_RECV_WAIT_TIMEOUT_S 1
 #define WS_TX_LATENCY_WARN_MS  250
 #define WS_SEND_TIME_WARN_MS   100
+#define WS_HTTPD_STACK_SIZE    8192
 
 #define WS_NOTIFY_AUTONOMOUS_SYNC BIT0
 #define WS_NOTIFY_INVENTORY_REFRESH BIT1
@@ -562,17 +564,25 @@ static esp_err_t ws_recv_text(httpd_req_t *req)
         return ESP_OK;
     }
 
-    char buf[WS_RX_MAX_MESSAGE];
-    memset(buf, 0, sizeof(buf));
+    char *buf = calloc(1u, frame.len + 1u);
+    if (!buf) {
+        ws_protocol_send_error(enqueue_payload_critical, NULL, 0,
+                               "internal_error",
+                               "Unable to allocate receive buffer");
+        return ESP_ERR_NO_MEM;
+    }
+
     frame.payload = (uint8_t *)buf;
     err = httpd_ws_recv_frame(req, &frame, frame.len);
     if (err != ESP_OK) {
+        free(buf);
         return err;
     }
 
     buf[frame.len] = '\0';
     ZB_LOG("WS RX text frame bytes=%u", (unsigned)frame.len);
     ws_protocol_handle_text(buf, enqueue_payload_auto, NULL);
+    free(buf);
     return ESP_OK;
 }
 
@@ -627,6 +637,7 @@ static esp_err_t start_server(void)
     config.close_fn = ws_close_fn;
     config.send_wait_timeout = WS_SEND_WAIT_TIMEOUT_S;
     config.recv_wait_timeout = WS_RECV_WAIT_TIMEOUT_S;
+    config.stack_size = WS_HTTPD_STACK_SIZE;
 
     esp_err_t err = httpd_start(&s_server, &config);
     if (err != ESP_OK) {

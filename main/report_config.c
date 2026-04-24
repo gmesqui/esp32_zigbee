@@ -2,9 +2,13 @@
 #include "device_manager.h"
 #include "device_interview.h"
 #include "utils.h"
+
 #include <string.h>
 #include <stdio.h>
+#include "freertos/FreeRTOS.h"
 #include "esp_zigbee_core.h"
+
+#define RC_ZB_LOCK_WAIT_MS 1000u
 
 // ---------------------------------------------------------------------------
 // Table of clusters we want to configure reporting for.
@@ -302,13 +306,24 @@ void rc_configure_device_async(device_record_t *dev)
     dev_idx = dm_index_of(dev);
     if (dev_idx < 0) return;
 
+    if (!esp_zb_lock_acquire(pdMS_TO_TICKS(RC_ZB_LOCK_WAIT_MS))) {
+        ZB_LOG("REPORT_CFG lock timeout");
+        return;
+    }
+
     esp_zb_scheduler_alarm(rc_configure_device_alarm, (uint8_t)dev_idx, 0);
+    esp_zb_lock_release();
 }
 
 bool rc_read_reporting_config_async(device_record_t *dev, uint8_t endpoint,
                                     uint16_t cluster_id, uint16_t attr_id)
 {
     if (!dev || !dev->in_use || endpoint == 0) {
+        return false;
+    }
+
+    if (!esp_zb_lock_acquire(pdMS_TO_TICKS(RC_ZB_LOCK_WAIT_MS))) {
+        ZB_LOG("READ_REPORT_CFG lock timeout");
         return false;
     }
 
@@ -324,9 +339,11 @@ bool rc_read_reporting_config_async(device_record_t *dev, uint8_t endpoint,
         s_read_report_cfg_queue[i].attr_id = attr_id;
         s_read_report_cfg_queue[i].in_use = true;
         esp_zb_scheduler_alarm(rc_read_reporting_config_alarm, i, 0);
+        esp_zb_lock_release();
         return true;
     }
 
+    esp_zb_lock_release();
     return false;
 }
 

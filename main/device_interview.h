@@ -32,6 +32,10 @@ void di_init(void);
  *  If no interview is in progress, starts immediately. */
 void di_enqueue(device_record_t *dev);
 
+/** Enqueue a device for interview from a non-Zigbee task.
+ *  Returns false if the Zigbee lock cannot be acquired in time. */
+bool di_enqueue_async(device_record_t *dev);
+
 /** Trigger async IEEE-address resolution for an unknown short address.
  *  Sends a ZDO IEEE Addr request; when the response arrives the device
  *  will be matched/created and any pending ZCL attributes replayed. */

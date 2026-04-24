@@ -11,6 +11,7 @@
 
 #define DEBOUNCE_MS         200u
 #define PERMIT_JOIN_SECS    180u
+#define BUTTON_ZB_LOCK_WAIT_MS 1000u
 
 // ---------------------------------------------------------------------------
 // Internal state
@@ -23,15 +24,30 @@ static volatile uint32_t s_last_press_ms  = 0;
 static esp_timer_handle_t s_join_timer    = NULL;
 static QueueHandle_t      s_btn_queue     = NULL;
 
+static bool zb_lock_for_button_api(void)
+{
+    if (esp_zb_lock_acquire(pdMS_TO_TICKS(BUTTON_ZB_LOCK_WAIT_MS))) {
+        return true;
+    }
+
+    ZB_LOG("PERMIT_JOIN lock timeout");
+    return false;
+}
+
 // ---------------------------------------------------------------------------
 // Permit-join open / close helpers
 // ---------------------------------------------------------------------------
 
 static void permit_join_open(uint8_t duration_s)
 {
+    if (!zb_lock_for_button_api()) {
+        return;
+    }
+
     s_permit_active = true;
     led_set_permit_join(true);
     esp_zb_bdb_open_network(duration_s);
+    esp_zb_lock_release();
     esp_timer_stop(s_join_timer);
     esp_timer_start_once(s_join_timer, (uint64_t)duration_s * 1000000ULL);
     ZB_LOG("PERMIT_JOIN OPEN (%"PRIu8" s)", duration_s);
@@ -39,9 +55,14 @@ static void permit_join_open(uint8_t duration_s)
 
 static void permit_join_close(void)
 {
+    if (!zb_lock_for_button_api()) {
+        return;
+    }
+
     s_permit_active = false;
     led_set_permit_join(false);
     esp_zb_bdb_close_network();
+    esp_zb_lock_release();
     esp_timer_stop(s_join_timer);
     ZB_LOG("PERMIT_JOIN CLOSED");
 }
@@ -96,7 +117,7 @@ static void btn_task(void *arg)
             }
         } else {
             // Timer expired
-            esp_zb_bdb_close_network();
+            permit_join_close();
         }
     }
 }

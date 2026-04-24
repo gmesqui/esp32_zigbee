@@ -25,6 +25,7 @@ idf_component_register(
     REQUIRES
         nvs_flash
         driver
+        esp_driver_usb_serial_jtag
         esp_timer
         freertos
         log

@@ -1,5 +1,6 @@
 # ESP-IDF build output
 build/
+build-*/
 build_log.txt
 build_stdout.txt
 build_stderr.txt

@@ -6,6 +6,7 @@
 #include "report_config.h"
 #include "utils.h"
 #include "ws_protocol_selftest.h"
+#include "sdkconfig.h"
 
 #include <stdio.h>
 #include <stdlib.h>
@@ -13,22 +14,74 @@
 
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
-#include "driver/uart.h"
 #include "esp_heap_caps.h"
 #include "esp_zigbee_core.h"
+
+#if defined(CONFIG_ESP_CONSOLE_UART_DEFAULT) || defined(CONFIG_ESP_CONSOLE_UART_CUSTOM)
+#include "driver/uart.h"
+#elif defined(CONFIG_ESP_CONSOLE_USB_SERIAL_JTAG)
+#include "driver/usb_serial_jtag.h"
+#else
+#error "Unsupported console channel for serial command handler"
+#endif
+
+#define SERIAL_ZB_LOCK_WAIT_MS 1000u
+
+// ---------------------------------------------------------------------------
+// Console channel abstraction
+// ---------------------------------------------------------------------------
+
+static const char *console_channel_name(void)
+{
+#if defined(CONFIG_ESP_CONSOLE_UART_DEFAULT) || defined(CONFIG_ESP_CONSOLE_UART_CUSTOM)
+    return "UART0";
+#elif defined(CONFIG_ESP_CONSOLE_USB_SERIAL_JTAG)
+    return "USB Serial/JTAG";
+#else
+    return "console";
+#endif
+}
+
+static esp_err_t console_channel_init(void)
+{
+#if defined(CONFIG_ESP_CONSOLE_UART_DEFAULT) || defined(CONFIG_ESP_CONSOLE_UART_CUSTOM)
+    return uart_driver_install(CONFIG_ESP_CONSOLE_UART_NUM, 256, 0, 0, NULL, 0);
+#elif defined(CONFIG_ESP_CONSOLE_USB_SERIAL_JTAG)
+    usb_serial_jtag_driver_config_t usb_cfg = USB_SERIAL_JTAG_DRIVER_CONFIG_DEFAULT();
+    return usb_serial_jtag_driver_install(&usb_cfg);
+#else
+    return ESP_ERR_NOT_SUPPORTED;
+#endif
+}
+
+static int console_read_bytes(uint8_t *buf, TickType_t timeout_ticks)
+{
+    if (!buf) {
+        return 0;
+    }
+
+#if defined(CONFIG_ESP_CONSOLE_UART_DEFAULT) || defined(CONFIG_ESP_CONSOLE_UART_CUSTOM)
+    return uart_read_bytes(CONFIG_ESP_CONSOLE_UART_NUM, buf, 1, timeout_ticks);
+#elif defined(CONFIG_ESP_CONSOLE_USB_SERIAL_JTAG)
+    return usb_serial_jtag_read_bytes(buf, 1, timeout_ticks);
+#else
+    (void)timeout_ticks;
+    return 0;
+#endif
+}
 
 // ---------------------------------------------------------------------------
 // Interactive input helpers
 // ---------------------------------------------------------------------------
 
-/** Read a line from UART0 into buf (blocking, echoed, no timeout). */
+/** Read a line from the active console into buf (blocking, echoed, no timeout). */
 static void read_line(char *buf, size_t len)
 {
     size_t pos = 0;
     memset(buf, 0, len);
     while (pos < len - 1) {
         uint8_t c;
-        if (uart_read_bytes(UART_NUM_0, &c, 1, pdMS_TO_TICKS(10000)) <= 0) break;
+        if (console_read_bytes(&c, pdMS_TO_TICKS(10000)) <= 0) break;
         if (c == '\r' || c == '\n') { putchar('\n'); break; }
         if (c == '\b' || c == 0x7F) {
             if (pos > 0) { pos--; printf("\b \b"); }
@@ -117,12 +170,21 @@ static void cmd_device_list(void)
 
 static void cmd_network_stats(void)
 {
-    uint8_t channel = esp_zb_get_current_channel();
-    uint16_t pan_id = esp_zb_get_pan_id();
+    uint8_t channel = 0;
+    uint16_t pan_id = 0;
     esp_zb_ieee_addr_t ext_pan;
-    esp_zb_get_extended_pan_id(ext_pan);
     esp_zb_ieee_addr_t coord_ieee;
+
+    if (!esp_zb_lock_acquire(pdMS_TO_TICKS(SERIAL_ZB_LOCK_WAIT_MS))) {
+        ZB_PRINT("NETWORK stats unavailable: Zigbee lock timeout\n");
+        return;
+    }
+
+    channel = esp_zb_get_current_channel();
+    pan_id = esp_zb_get_pan_id();
+    esp_zb_get_extended_pan_id(ext_pan);
     esp_zb_get_long_address(coord_ieee);
+    esp_zb_lock_release();
 
     uint8_t online = 0;
     for (int i = 0; i < MAX_DEVICES; i++) {
@@ -229,7 +291,11 @@ static void cmd_reinterview(void)
     }
 
     dev->state = DEV_STATE_NEW;
-    di_enqueue(dev);
+    if (!di_enqueue_async(dev)) {
+        printf("Unable to queue interview right now.\n");
+        return;
+    }
+
     printf("Re-interview queued for %s\n", dm_display_name(dev));
 }
 
@@ -341,10 +407,11 @@ static void serial_cmd_task(void *arg)
     (void)arg;
     uint8_t c;
 
-    ZB_PRINT("Serial command task ready. Press '?' for help.\n");
+    ZB_PRINT("Serial command task ready on %s. Press '?' for help.\n",
+             console_channel_name());
 
     for (;;) {
-        int n = uart_read_bytes(UART_NUM_0, &c, 1, pdMS_TO_TICKS(200));
+        int n = console_read_bytes(&c, pdMS_TO_TICKS(200));
         if (n <= 0) continue;
 
         switch ((char)c) {
@@ -398,8 +465,8 @@ static void serial_cmd_task(void *arg)
 
 void serial_cmd_init(void)
 {
-    uart_driver_install(UART_NUM_0, 256, 0, 0, NULL, 0);
+    ESP_ERROR_CHECK(console_channel_init());
 
     xTaskCreate(serial_cmd_task, "serial_cmd_task", 4096, NULL, 3, NULL);
-    ZB_LOG("Serial command handler init OK");
+    ZB_LOG("Serial command handler init OK on %s", console_channel_name());
 }

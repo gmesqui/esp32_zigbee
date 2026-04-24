@@ -1,4 +1,5 @@
 #include "eth_driver.h"
+#include "board_config.h"
 #include "utils.h"
 
 #include "esp_event.h"
@@ -10,18 +11,6 @@
 #include "driver/gpio.h"
 #include "mdns.h"
 #include "esp_heap_caps.h"
-
-// ---------------------------------------------------------------------------
-// GPIO / SPI pin mapping
-// ---------------------------------------------------------------------------
-#define ETH_SPI_HOST    SPI2_HOST
-#define ETH_MOSI_GPIO   4
-#define ETH_MISO_GPIO   5
-#define ETH_SCLK_GPIO   6
-#define ETH_CS_GPIO     23
-#define ETH_INT_GPIO    24
-#define ETH_RST_GPIO    25
-#define ETH_SPI_CLOCK_HZ (20 * 1000 * 1000)   // 20 MHz
 
 // ---------------------------------------------------------------------------
 // Module state
@@ -180,7 +169,9 @@ EventGroupHandle_t eth_driver_init(void)
 
     // 11. Start Ethernet
     ESP_ERROR_CHECK(esp_eth_start(eth_handle));
-    ZB_LOG("ETH: W5500 driver started (waiting for DHCP)");
+    ZB_LOG("ETH: W5500 driver started on %s (MOSI=%d MISO=%d SCLK=%d CS=%d INT=%d RST=%d, waiting for DHCP)",
+           BOARD_NAME, ETH_MOSI_GPIO, ETH_MISO_GPIO, ETH_SCLK_GPIO,
+           ETH_CS_GPIO, ETH_INT_GPIO, ETH_RST_GPIO);
 
     return s_eth_eg;
 }
