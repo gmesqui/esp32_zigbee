@@ -67,7 +67,4 @@ void rc_write_ias_cie_address(uint16_t nwk_addr, uint8_t endpoint);
 // ---------------------------------------------------------------------------
 #define COORD_ENDPOINT  1
 
-// Presence timeout must never be tighter than the reporting max_interval.
-// Add extra slack beyond the 10 s maintenance cadence to avoid premature
-// offline transitions near the reporting boundary.
-#define REPORT_CFG_PRESENCE_GRACE_S 20u
+// Presence timeout is configured at runtime as reporting max_interval + grace.

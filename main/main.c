@@ -3,6 +3,7 @@
 #include "nvs_flash.h"
 #include "nvs.h"
 #include "utils.h"
+#include "app_config.h"
 #include "device_manager.h"
 #include "nvs_cache.h"
 #include "zcl_handler.h"
@@ -37,7 +38,10 @@ void app_main(void)
     ZB_LOG("=== %s Zigbee Coordinator booting (%s) ===", BOARD_SOC_NAME, BOARD_NAME);
     ZB_LOG("Build: " __DATE__ " " __TIME__);
 
-    // 2. Zigbee event bus (neutral layer; must be before any emitters or consumers)
+    // 2. Application configuration stored in NVS
+    app_config_init();
+
+    // 3. Zigbee event bus (neutral layer; must be before any emitters or consumers)
     zb_events_init();
 
     // 3. Ethernet driver (non-blocking; starts DHCP asynchronously)

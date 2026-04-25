@@ -1,4 +1,5 @@
 #include "button_handler.h"
+#include "app_config.h"
 #include "led_driver.h"
 #include "utils.h"
 #include "driver/gpio.h"
@@ -10,7 +11,6 @@
 #include <inttypes.h>
 
 #define DEBOUNCE_MS         200u
-#define PERMIT_JOIN_SECS    180u
 #define BUTTON_ZB_LOCK_WAIT_MS 1000u
 
 // ---------------------------------------------------------------------------
@@ -20,6 +20,7 @@
 static volatile bool     s_stack_ready    = false;
 static volatile bool     s_permit_active  = false;
 static volatile uint32_t s_last_press_ms  = 0;
+static volatile uint32_t s_permit_until_ms = 0;
 
 static esp_timer_handle_t s_join_timer    = NULL;
 static QueueHandle_t      s_btn_queue     = NULL;
@@ -45,6 +46,8 @@ static void permit_join_open(uint8_t duration_s)
     }
 
     s_permit_active = true;
+    s_permit_until_ms = (uint32_t)(esp_timer_get_time() / 1000ULL) +
+                        ((uint32_t)duration_s * 1000u);
     led_set_permit_join(true);
     esp_zb_bdb_open_network(duration_s);
     esp_zb_lock_release();
@@ -60,6 +63,7 @@ static void permit_join_close(void)
     }
 
     s_permit_active = false;
+    s_permit_until_ms = 0;
     led_set_permit_join(false);
     esp_zb_bdb_close_network();
     esp_zb_lock_release();
@@ -75,6 +79,7 @@ static void join_timer_cb(void *arg)
 {
     (void)arg;
     s_permit_active = false;
+    s_permit_until_ms = 0;
     led_set_permit_join(false);
     // Note: esp_zb_bdb_close_network() must be called from Zigbee task context.
     // We signal via the same queue the button uses.
@@ -111,7 +116,9 @@ static void btn_task(void *arg)
         if (ev == 0x01) {
             // Button press
             if (!s_permit_active) {
-                permit_join_open(PERMIT_JOIN_SECS);
+                app_config_t cfg;
+                app_config_get(&cfg);
+                permit_join_open((uint8_t)cfg.permit_join_duration_s);
             } else {
                 permit_join_close();
             }
@@ -191,6 +198,19 @@ void button_handler_set_stack_ready(bool ready)
 bool button_handler_permit_join_active(void)
 {
     return s_permit_active;
+}
+
+uint32_t button_handler_permit_join_remaining_s(void)
+{
+    if (!s_permit_active || s_permit_until_ms == 0) {
+        return 0;
+    }
+
+    uint32_t now_ms = (uint32_t)(esp_timer_get_time() / 1000ULL);
+    if ((int32_t)(s_permit_until_ms - now_ms) <= 0) {
+        return 0;
+    }
+    return (s_permit_until_ms - now_ms + 999u) / 1000u;
 }
 
 void button_handler_set_permit_join_duration(uint8_t duration_s)

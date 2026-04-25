@@ -1,4 +1,5 @@
 #include "serial_cmd.h"
+#include "app_config.h"
 #include "device_manager.h"
 #include "device_interview.h"
 #include "nvs_cache.h"
@@ -458,8 +459,10 @@ static void serial_cmd_task(void *arg)
                 break;
             case 'j':
                 if (!button_handler_permit_join_active()) {
-                    button_handler_set_permit_join_duration(180);
-                    ZB_LOG("PERMIT_JOIN OPEN via serial (180s)");
+                    app_config_t cfg;
+                    app_config_get(&cfg);
+                    button_handler_set_permit_join_duration((uint8_t)cfg.permit_join_duration_s);
+                    ZB_LOG("PERMIT_JOIN OPEN via serial (%us)", cfg.permit_join_duration_s);
                 } else {
                     button_handler_set_permit_join_duration(0);
                     ZB_LOG("PERMIT_JOIN CLOSED via serial");

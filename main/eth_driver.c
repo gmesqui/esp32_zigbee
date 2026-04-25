@@ -1,4 +1,5 @@
 #include "eth_driver.h"
+#include "app_config.h"
 #include "board_config.h"
 #include "utils.h"
 
@@ -11,25 +12,69 @@
 #include "driver/gpio.h"
 #include "mdns.h"
 #include "esp_heap_caps.h"
+#include <stdio.h>
 
 // ---------------------------------------------------------------------------
 // Module state
 // ---------------------------------------------------------------------------
 static EventGroupHandle_t s_eth_eg;
+static bool s_mdns_ready;
+static eth_driver_status_t s_status;
+static portMUX_TYPE s_status_lock = portMUX_INITIALIZER_UNLOCKED;
+
+static void status_set_str(char *dst, size_t dst_len, const char *src)
+{
+    if (!dst || dst_len == 0) {
+        return;
+    }
+    if (!src) {
+        src = "";
+    }
+    snprintf(dst, dst_len, "%s", src);
+}
+
+static void format_mac(const uint8_t mac[6], char *buf, size_t len)
+{
+    if (!mac || !buf || len == 0) {
+        return;
+    }
+    snprintf(buf, len, "%02X:%02X:%02X:%02X:%02X:%02X",
+             mac[0], mac[1], mac[2], mac[3], mac[4], mac[5]);
+}
 
 // ---------------------------------------------------------------------------
 // mDNS — called once after IP is obtained
 // ---------------------------------------------------------------------------
+void eth_driver_apply_mdns_config(void)
+{
+    app_config_t cfg;
+    app_config_get(&cfg);
+
+    if (!s_mdns_ready) {
+        return;
+    }
+
+    mdns_hostname_set(cfg.mdns_hostname);
+    mdns_instance_name_set(cfg.mdns_instance);
+    ZB_LOG("mDNS: hostname=%s.local instance=\"%s\"",
+           cfg.mdns_hostname, cfg.mdns_instance);
+}
+
 static void mdns_init_once(void)
 {
+    if (s_mdns_ready) {
+        eth_driver_apply_mdns_config();
+        return;
+    }
+
     esp_err_t err = mdns_init();
     if (err != ESP_OK) {
         ZB_LOG("mDNS: init failed (%s)", esp_err_to_name(err));
         return;
     }
-    mdns_hostname_set("esp32-zigbee");
-    mdns_instance_name_set("ESP32 Zigbee Coordinator");
-    ZB_LOG("mDNS: hostname=esp32-zigbee.local");
+
+    s_mdns_ready = true;
+    eth_driver_apply_mdns_config();
 }
 
 // ---------------------------------------------------------------------------
@@ -41,6 +86,18 @@ static void ip_event_handler(void *arg, esp_event_base_t base,
     if (base == IP_EVENT && id == IP_EVENT_ETH_GOT_IP) {
         ip_event_got_ip_t *e = (ip_event_got_ip_t *)data;
         size_t free_internal = heap_caps_get_free_size(MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT);
+        char ip[16];
+        char gw[16];
+        char netmask[16];
+        snprintf(ip, sizeof(ip), IPSTR, IP2STR(&e->ip_info.ip));
+        snprintf(gw, sizeof(gw), IPSTR, IP2STR(&e->ip_info.gw));
+        snprintf(netmask, sizeof(netmask), IPSTR, IP2STR(&e->ip_info.netmask));
+        portENTER_CRITICAL(&s_status_lock);
+        s_status.has_ip = true;
+        status_set_str(s_status.ip, sizeof(s_status.ip), ip);
+        status_set_str(s_status.gateway, sizeof(s_status.gateway), gw);
+        status_set_str(s_status.netmask, sizeof(s_status.netmask), netmask);
+        portEXIT_CRITICAL(&s_status_lock);
         ZB_LOG("ETH: IP " IPSTR " / GW " IPSTR,
                IP2STR(&e->ip_info.ip), IP2STR(&e->ip_info.gw));
         ZB_LOG("ETH: free internal heap=%u bytes", (unsigned)free_internal);
@@ -48,6 +105,12 @@ static void ip_event_handler(void *arg, esp_event_base_t base,
         xEventGroupSetBits(s_eth_eg, ETH_IP_READY_BIT);
     } else if (base == IP_EVENT && id == IP_EVENT_ETH_LOST_IP) {
         ZB_LOG("ETH: IP lost");
+        portENTER_CRITICAL(&s_status_lock);
+        s_status.has_ip = false;
+        status_set_str(s_status.ip, sizeof(s_status.ip), "");
+        status_set_str(s_status.gateway, sizeof(s_status.gateway), "");
+        status_set_str(s_status.netmask, sizeof(s_status.netmask), "");
+        portEXIT_CRITICAL(&s_status_lock);
         xEventGroupClearBits(s_eth_eg, ETH_IP_READY_BIT);
     }
 }
@@ -57,10 +120,18 @@ static void eth_event_handler(void *arg, esp_event_base_t base,
 {
     switch (id) {
         case ETHERNET_EVENT_CONNECTED:
+            portENTER_CRITICAL(&s_status_lock);
+            s_status.link_up = true;
+            portEXIT_CRITICAL(&s_status_lock);
             if (data) {
                 uint8_t mac_addr[6] = {0};
                 esp_eth_handle_t eth_handle = *(esp_eth_handle_t *)data;
                 if (esp_eth_ioctl(eth_handle, ETH_CMD_G_MAC_ADDR, mac_addr) == ESP_OK) {
+                    char mac_str[18];
+                    format_mac(mac_addr, mac_str, sizeof(mac_str));
+                    portENTER_CRITICAL(&s_status_lock);
+                    status_set_str(s_status.mac, sizeof(s_status.mac), mac_str);
+                    portEXIT_CRITICAL(&s_status_lock);
                     ZB_LOG("ETH: link up, MAC %02X:%02X:%02X:%02X:%02X:%02X",
                            mac_addr[0], mac_addr[1], mac_addr[2],
                            mac_addr[3], mac_addr[4], mac_addr[5]);
@@ -71,12 +142,28 @@ static void eth_event_handler(void *arg, esp_event_base_t base,
             break;
         case ETHERNET_EVENT_DISCONNECTED:
             ZB_LOG("ETH: link down");
+            portENTER_CRITICAL(&s_status_lock);
+            s_status.link_up = false;
+            s_status.has_ip = false;
+            status_set_str(s_status.ip, sizeof(s_status.ip), "");
+            status_set_str(s_status.gateway, sizeof(s_status.gateway), "");
+            status_set_str(s_status.netmask, sizeof(s_status.netmask), "");
+            portEXIT_CRITICAL(&s_status_lock);
+            xEventGroupClearBits(s_eth_eg, ETH_IP_READY_BIT);
             break;
         case ETHERNET_EVENT_START:
             ZB_LOG("ETH: started");
+            portENTER_CRITICAL(&s_status_lock);
+            s_status.started = true;
+            portEXIT_CRITICAL(&s_status_lock);
             break;
         case ETHERNET_EVENT_STOP:
             ZB_LOG("ETH: stopped");
+            portENTER_CRITICAL(&s_status_lock);
+            s_status.started = false;
+            s_status.link_up = false;
+            s_status.has_ip = false;
+            portEXIT_CRITICAL(&s_status_lock);
             break;
         default:
             break;
@@ -156,6 +243,11 @@ EventGroupHandle_t eth_driver_init(void)
     uint8_t eth_mac[6] = {0};
     ESP_ERROR_CHECK(esp_read_mac(eth_mac, ESP_MAC_ETH));
     ESP_ERROR_CHECK(esp_eth_ioctl(eth_handle, ETH_CMD_S_MAC_ADDR, eth_mac));
+    char mac_str[18];
+    format_mac(eth_mac, mac_str, sizeof(mac_str));
+    portENTER_CRITICAL(&s_status_lock);
+    status_set_str(s_status.mac, sizeof(s_status.mac), mac_str);
+    portEXIT_CRITICAL(&s_status_lock);
 
     // 9. Attach to netif
     esp_eth_netif_glue_handle_t glue = esp_eth_new_netif_glue(eth_handle);
@@ -174,4 +266,15 @@ EventGroupHandle_t eth_driver_init(void)
            ETH_CS_GPIO, ETH_INT_GPIO, ETH_RST_GPIO);
 
     return s_eth_eg;
+}
+
+void eth_driver_get_status(eth_driver_status_t *out)
+{
+    if (!out) {
+        return;
+    }
+
+    portENTER_CRITICAL(&s_status_lock);
+    *out = s_status;
+    portEXIT_CRITICAL(&s_status_lock);
 }

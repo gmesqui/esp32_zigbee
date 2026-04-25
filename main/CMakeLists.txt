@@ -1,6 +1,7 @@
 idf_component_register(
     SRCS
         "main.c"
+        "app_config.c"
         "utils.c"
         "led_driver.c"
         "button_handler.c"

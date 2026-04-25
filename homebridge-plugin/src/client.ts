@@ -278,8 +278,11 @@ export class GatewayClient extends EventEmitter {
     }
 
     return new Promise<CmdResultMessage>((resolve, reject) => {
+      const command = typeof payload.data.command === 'string' ? payload.data.command : 'unknown';
+      const deviceId = typeof payload.data.device_id === 'string' ? payload.data.device_id : 'unknown';
       const timer = setTimeout(() => {
         this.pendingCommands.delete(payload.msg_id);
+        this.logger.warn(`Timeout esperando cmd_result msg_id=${payload.msg_id} command=${command} device=${deviceId}`);
         reject(new Error(`Command timeout after ${this.options.commandTimeoutMs} ms`));
       }, this.options.commandTimeoutMs);
 
@@ -289,7 +292,20 @@ export class GatewayClient extends EventEmitter {
         reject,
       });
 
-      this.socket?.send(JSON.stringify(payload));
+      this.socket?.send(JSON.stringify(payload), error => {
+        if (!error) {
+          return;
+        }
+
+        const pending = this.pendingCommands.get(payload.msg_id);
+        if (!pending) {
+          return;
+        }
+
+        clearTimeout(pending.timer);
+        this.pendingCommands.delete(payload.msg_id);
+        pending.reject(error);
+      });
     });
   }
 

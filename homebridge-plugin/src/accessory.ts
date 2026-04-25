@@ -315,7 +315,15 @@ export class ZigbeeDeviceAccessory {
     }
 
     const next = Boolean(value);
-    await this.platform.sendOnOffCommand(this.device.device_id, next);
+    try {
+      await this.platform.sendOnOffCommand(this.device.device_id, next);
+    } catch (error) {
+      this.platform.log.warn(
+        `No se pudo cambiar ${this.device.name} a ${next ? 'ON' : 'OFF'}: ${(error as Error).message}`,
+      );
+      throw new HapStatusError(HAPStatus.SERVICE_COMMUNICATION_FAILURE);
+    }
+
     this.applyEventChanges({
       state: {
         value: next ? 'ON' : 'OFF',

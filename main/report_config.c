@@ -1,4 +1,5 @@
 #include "report_config.h"
+#include "app_config.h"
 #include "device_manager.h"
 #include "device_interview.h"
 #include "utils.h"
@@ -52,8 +53,6 @@ static const report_cfg_entry_t k_report_table[] = {
 };
 #define REPORT_TABLE_COUNT  (sizeof(k_report_table) / sizeof(k_report_table[0]))
 
-#define REPORT_CFG_MAX_INTERVAL_ALWAYS_ON_S 300u
-#define REPORT_CFG_MAX_INTERVAL_SLEEPY_S    3600u
 #define READ_REPORT_CFG_QUEUE_LEN           4
 
 typedef struct {
@@ -69,14 +68,18 @@ static read_report_cfg_req_t s_read_report_cfg_queue[READ_REPORT_CFG_QUEUE_LEN];
 
 uint16_t rc_effective_max_interval(bool is_sleepy)
 {
-    return is_sleepy ? REPORT_CFG_MAX_INTERVAL_SLEEPY_S
-                     : REPORT_CFG_MAX_INTERVAL_ALWAYS_ON_S;
+    app_config_t cfg;
+    app_config_get(&cfg);
+    return is_sleepy ? cfg.report_sleepy_max_s
+                     : cfg.report_always_on_max_s;
 }
 
 uint32_t rc_presence_timeout_ms(bool is_sleepy)
 {
+    app_config_t cfg;
+    app_config_get(&cfg);
     uint32_t max_interval_s = rc_effective_max_interval(is_sleepy);
-    return (max_interval_s + REPORT_CFG_PRESENCE_GRACE_S) * 1000u;
+    return (max_interval_s + cfg.presence_grace_s) * 1000u;
 }
 
 static void rc_configure_device_alarm(uint8_t dev_idx)

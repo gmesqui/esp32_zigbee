@@ -891,3 +891,24 @@ void zcl_forget_device(uint64_t ieee)
     unsupported_clear_device_locked(ieee);
     xSemaphoreGive(g_attr_mutex);
 }
+
+size_t zcl_get_cached_attrs(uint64_t ieee, attr_cache_entry_t *out,
+                            size_t out_len)
+{
+    size_t count = 0;
+
+    xSemaphoreTake(g_attr_mutex, portMAX_DELAY);
+    for (int i = 0; i < MAX_ATTR_CACHE; i++) {
+        const attr_cache_entry_t *entry = &g_attr_cache[i];
+        if (!entry->in_use || entry->ieee_addr != ieee) {
+            continue;
+        }
+
+        if (out && count < out_len) {
+            out[count] = *entry;
+        }
+        count++;
+    }
+    xSemaphoreGive(g_attr_mutex);
+    return count;
+}

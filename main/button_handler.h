@@ -12,6 +12,7 @@ void button_handler_init(void);
 void button_handler_set_stack_ready(bool ready);
 
 bool button_handler_permit_join_active(void);
+uint32_t button_handler_permit_join_remaining_s(void);
 
 // Open or close permit-join for the specified duration.
 // duration_s == 0 closes the network; any other value opens it and refreshes

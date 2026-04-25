@@ -1,4 +1,5 @@
 #pragma once
+#include <stddef.h>
 #include <stdint.h>
 #include <stdbool.h>
 #include "esp_zigbee_core.h"
@@ -87,3 +88,7 @@ void zcl_clear_unsupported_attrs(uint64_t ieee);
 
 /** Remove all cached ZCL knowledge for a device that has been deleted. */
 void zcl_forget_device(uint64_t ieee);
+
+/** Copy cached attributes for one device. Returns total matching count. */
+size_t zcl_get_cached_attrs(uint64_t ieee, attr_cache_entry_t *out,
+                            size_t out_len);
