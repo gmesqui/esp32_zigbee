@@ -291,8 +291,11 @@ size_t rc_configure_device(device_record_t *dev)
     dev->report_cfg_received = 0;
     dev->report_cfg_failed = 0;
     dev->report_cfg_in_progress = (configured_count > 0);
-    dev->reporting_configured = (configured_count == 0);
-    dev->dirty = true;
+    bool reporting_configured = (configured_count == 0);
+    if (dev->reporting_configured != reporting_configured) {
+        dev->reporting_configured = reporting_configured;
+        dev->dirty = true;
+    }
 
     return (size_t)configured_count;
 }
@@ -393,8 +396,11 @@ void rc_on_config_resp(const esp_zb_zcl_cmd_config_report_resp_message_t *msg)
         }
         if (dev->report_cfg_received >= dev->report_cfg_expected) {
             dev->report_cfg_in_progress = false;
-            dev->reporting_configured = (dev->report_cfg_failed == 0);
-            dev->dirty = true;
+            bool reporting_configured = (dev->report_cfg_failed == 0);
+            if (dev->reporting_configured != reporting_configured) {
+                dev->reporting_configured = reporting_configured;
+                dev->dirty = true;
+            }
         }
     }
 

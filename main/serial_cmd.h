@@ -8,6 +8,7 @@
 //
 // - ESP32-C5: UART0
 // - ESP32-C6: native USB Serial/JTAG
+// - TCP: port 2323 when Ethernet is up and a client is connected
 //
 // Key map:
 //   '1' - Plain-text dump of all devices

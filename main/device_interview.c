@@ -156,8 +156,10 @@ static void interview_finish_reporting_validation(uint8_t dev_idx, bool timed_ou
 
     if (timed_out && dev->report_cfg_in_progress) {
         dev->report_cfg_in_progress = false;
-        dev->reporting_configured = false;
-        dev->dirty = true;
+        if (dev->reporting_configured) {
+            dev->reporting_configured = false;
+            dev->dirty = true;
+        }
     }
 
     if (!dev->report_cfg_in_progress &&
@@ -453,7 +455,6 @@ static void interview_done(uint8_t dev_idx)
     device_record_t *dev = dm_get_by_index(dev_idx);
     if (dev) {
         dev->state = DEV_STATE_CONFIGURED;
-        dev->dirty = true;
         // Save immediately after interview
         nvs_cache_save_device(dev_idx);
         ZB_LOG("INTERVIEW %s COMPLETE (eps=%u mfr=%s model=%s %s)",
@@ -889,11 +890,17 @@ void di_on_node_desc_resp(esp_zb_zdp_status_t zdo_status, uint16_t addr,
 
     g_ictx.retry = 0;
     if (dev) {
-        dev->node_desc_flags      = node_desc->node_desc_flags;
-        dev->mac_capability_flags = node_desc->mac_capability_flags;
-        dev->manufacturer_code    = node_desc->manufacturer_code;
-        dev->is_sleepy            = !(dev->mac_capability_flags & 0x08);
-        dev->dirty                = true;
+        bool next_is_sleepy = !(node_desc->mac_capability_flags & 0x08);
+        if (dev->node_desc_flags != node_desc->node_desc_flags ||
+            dev->mac_capability_flags != node_desc->mac_capability_flags ||
+            dev->manufacturer_code != node_desc->manufacturer_code ||
+            dev->is_sleepy != next_is_sleepy) {
+            dev->node_desc_flags      = node_desc->node_desc_flags;
+            dev->mac_capability_flags = node_desc->mac_capability_flags;
+            dev->manufacturer_code    = node_desc->manufacturer_code;
+            dev->is_sleepy            = next_is_sleepy;
+            dev->dirty                = true;
+        }
 
         ZB_LOG("INTERVIEW %s NODE_DESC OK addr=0x%04X mfr=0x%04X %s mac=0x%02X",
                dm_display_name(dev), addr, dev->manufacturer_code,
@@ -924,8 +931,10 @@ void di_on_power_desc_resp(esp_zb_zdo_power_desc_rsp_t *resp, void *user_ctx)
         uint16_t flags = 0;
         memcpy(&flags, &resp->desc, sizeof(uint16_t) < sizeof(resp->desc)
                                      ? sizeof(uint16_t) : sizeof(resp->desc));
-        dev->power_desc_flags = flags;
-        dev->dirty = true;
+        if (dev->power_desc_flags != flags) {
+            dev->power_desc_flags = flags;
+            dev->dirty = true;
+        }
         ZB_LOG("INTERVIEW %s POWER_DESC OK avail_src=0x%X cur_src=0x%X",
                dm_display_name(dev),
                resp->desc.available_power_sources,
@@ -964,11 +973,20 @@ void di_on_active_ep_resp(esp_zb_zdp_status_t zdo_status, uint8_t ep_count,
     if (dev) {
         uint8_t cnt = ep_count;
         if (cnt > MAX_ENDPOINTS) cnt = MAX_ENDPOINTS;
+        bool changed = (dev->endpoint_count != cnt);
+        for (int i = 0; i < cnt; i++) {
+            if (dev->endpoints[i].endpoint_id != ep_id_list[i]) {
+                changed = true;
+                break;
+            }
+        }
         dev->endpoint_count = cnt;
         for (int i = 0; i < cnt; i++) {
             dev->endpoints[i].endpoint_id = ep_id_list[i];
         }
-        dev->dirty = true;
+        if (changed) {
+            dev->dirty = true;
+        }
         ZB_LOG("INTERVIEW %s ACTIVE_EP OK count=%u", dm_display_name(dev), cnt);
     }
 
@@ -1003,6 +1021,13 @@ void di_on_simple_desc_resp(esp_zb_zdp_status_t zdo_status,
         uint8_t ep_idx = g_ictx.ep_cursor;
         if (ep_idx < MAX_ENDPOINTS) {
             endpoint_record_t *ep = &dev->endpoints[ep_idx];
+            bool changed = false;
+            if (ep->endpoint_id != simple_desc->endpoint ||
+                ep->profile_id != simple_desc->app_profile_id ||
+                ep->device_id != simple_desc->app_device_id ||
+                ep->device_version != (uint8_t)simple_desc->app_device_version) {
+                changed = true;
+            }
             ep->endpoint_id    = simple_desc->endpoint;
             ep->profile_id     = simple_desc->app_profile_id;
             ep->device_id      = simple_desc->app_device_id;
@@ -1012,6 +1037,20 @@ void di_on_simple_desc_resp(esp_zb_zdp_status_t zdo_status,
             uint8_t out_count = simple_desc->app_output_cluster_count;
             if (in_count  > MAX_CLUSTERS_PER_EP) in_count  = MAX_CLUSTERS_PER_EP;
             if (out_count > MAX_CLUSTERS_PER_EP) out_count = MAX_CLUSTERS_PER_EP;
+
+            if (ep->in_cluster_count != in_count ||
+                ep->out_cluster_count != out_count) {
+                changed = true;
+            }
+            if (simple_desc->app_cluster_list) {
+                if (memcmp(ep->in_clusters, simple_desc->app_cluster_list,
+                           in_count * sizeof(uint16_t)) != 0 ||
+                    memcmp(ep->out_clusters,
+                           simple_desc->app_cluster_list + in_count,
+                           out_count * sizeof(uint16_t)) != 0) {
+                    changed = true;
+                }
+            }
 
             ep->in_cluster_count  = in_count;
             ep->out_cluster_count = out_count;
@@ -1025,7 +1064,9 @@ void di_on_simple_desc_resp(esp_zb_zdp_status_t zdo_status,
                        out_count * sizeof(uint16_t));
             }
 
-            dev->dirty = true;
+            if (changed) {
+                dev->dirty = true;
+            }
             ZB_LOG("INTERVIEW %s SIMPLE_DESC ep=%u profile=0x%04X "
                    "dev_id=%s in=%u out=%u",
                    dm_display_name(dev), ep->endpoint_id, ep->profile_id,

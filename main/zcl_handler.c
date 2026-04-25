@@ -581,18 +581,26 @@ static bool process_attribute(device_record_t *dev, uint8_t ep,
             // manufacturer string (ZCL octet string: first byte = length)
             uint8_t slen = val[0];
             if (slen > 32) slen = 32;
-            memcpy(dev->manufacturer, val + 1, slen);
-            dev->manufacturer[slen] = '\0';
-            dev->dirty = true;
+            char next[33] = {0};
+            memcpy(next, val + 1, slen);
+            if (strcmp(dev->manufacturer, next) != 0) {
+                memcpy(dev->manufacturer, next, sizeof(dev->manufacturer));
+                dev->dirty = true;
+            }
         } else if (attr_id == 0x0005 && attr_type == 0x42) {
             uint8_t slen = val[0];
             if (slen > 32) slen = 32;
-            memcpy(dev->model, val + 1, slen);
-            dev->model[slen] = '\0';
-            dev->dirty = true;
+            char next[33] = {0};
+            memcpy(next, val + 1, slen);
+            if (strcmp(dev->model, next) != 0) {
+                memcpy(dev->model, next, sizeof(dev->model));
+                dev->dirty = true;
+            }
         } else if (attr_id == 0x0007) {
-            dev->power_source = val[0];
-            dev->dirty = true;
+            if (dev->power_source != val[0]) {
+                dev->power_source = val[0];
+                dev->dirty = true;
+            }
         }
     }
 

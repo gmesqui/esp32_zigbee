@@ -57,7 +57,8 @@ typedef struct {
                         MAX_CLUSTERS_PER_EP * 2 * sizeof(uint16_t) + \
                         MAX_BINDINGS_PER_EP * sizeof(nvs_binding_t)))
 
-static uint8_t s_blob[MAX_BLOB_SIZE];   // shared serialisation buffer
+static uint8_t s_blob[MAX_BLOB_SIZE];          // shared serialisation buffer
+static uint8_t s_existing_blob[MAX_BLOB_SIZE]; // shared comparison buffer
 
 // ---------------------------------------------------------------------------
 // Serialise one device into s_blob. Returns written length.
@@ -229,10 +230,49 @@ static void make_key(uint8_t idx, char *key, size_t key_len)
     snprintf(key, key_len, "%s%02u", NVS_KEY_DEV_PREFIX, (unsigned)idx);
 }
 
-static esp_err_t write_head(nvs_handle_t handle)
+static void build_head(uint8_t head[2])
 {
-    uint8_t head[2] = { NVS_CACHE_VERSION, (uint8_t)dm_count() };
-    return nvs_set_blob(handle, NVS_KEY_HEAD, head, sizeof(head));
+    head[0] = NVS_CACHE_VERSION;
+    head[1] = (uint8_t)dm_count();
+}
+
+static bool nvs_blob_matches(nvs_handle_t handle, const char *key,
+                             const uint8_t *blob, size_t len)
+{
+    size_t existing_len = 0;
+    esp_err_t err = nvs_get_blob(handle, key, NULL, &existing_len);
+    if (err != ESP_OK || existing_len != len || existing_len > sizeof(s_existing_blob)) {
+        return false;
+    }
+
+    err = nvs_get_blob(handle, key, s_existing_blob, &existing_len);
+    return err == ESP_OK && existing_len == len &&
+           memcmp(s_existing_blob, blob, len) == 0;
+}
+
+static esp_err_t write_head_if_changed(nvs_handle_t handle, bool *changed)
+{
+    uint8_t head[2];
+    uint8_t existing[2] = {0};
+    size_t existing_len = sizeof(existing);
+    esp_err_t err;
+
+    if (changed) {
+        *changed = false;
+    }
+
+    build_head(head);
+    err = nvs_get_blob(handle, NVS_KEY_HEAD, existing, &existing_len);
+    if (err == ESP_OK && existing_len == sizeof(existing) &&
+        memcmp(existing, head, sizeof(head)) == 0) {
+        return ESP_OK;
+    }
+
+    err = nvs_set_blob(handle, NVS_KEY_HEAD, head, sizeof(head));
+    if (err == ESP_OK && changed) {
+        *changed = true;
+    }
+    return err;
 }
 
 // ---------------------------------------------------------------------------
@@ -293,22 +333,48 @@ void nvs_cache_save_device(uint8_t idx)
         return;
     }
 
+    bool needs_commit = false;
+    bool device_written = false;
+    bool header_changed = false;
+    bool header_error = false;
     size_t len = serialise(idx);
     if (len > 0) {
         char key[16];
         make_key(idx, key, sizeof(key));
-        err = nvs_set_blob(handle, key, s_blob, len);
-        if (err == ESP_OK) {
-            nvs_commit(handle);
-            d->dirty = false;
-        } else {
-            ZB_LOG("NVS cache: write error for slot %u (%d)", idx, err);
+        if (!nvs_blob_matches(handle, key, s_blob, len)) {
+            err = nvs_set_blob(handle, key, s_blob, len);
+            if (err == ESP_OK) {
+                needs_commit = true;
+                device_written = true;
+            } else {
+                ZB_LOG("NVS cache: write error for slot %u (%d)", idx, err);
+            }
         }
     }
 
     // Update header
-    write_head(handle);
-    nvs_commit(handle);
+    err = write_head_if_changed(handle, &header_changed);
+    if (err != ESP_OK) {
+        ZB_LOG("NVS cache: header update failed (%d)", err);
+        header_error = true;
+    } else if (header_changed) {
+        needs_commit = true;
+    }
+
+    if (needs_commit) {
+        err = nvs_commit(handle);
+        if (err == ESP_OK) {
+            d->dirty = header_error;
+            if (!device_written && header_changed) {
+                ZB_LOG("NVS cache: header updated");
+            }
+        } else {
+            d->dirty = true;
+            ZB_LOG("NVS cache: commit failed for slot %u (%d)", idx, err);
+        }
+    } else if (!header_error) {
+        d->dirty = false;
+    }
     nvs_close(handle);
 }
 
@@ -323,17 +389,29 @@ void nvs_cache_delete_device(uint8_t idx)
 
     char key[16];
     make_key(idx, key, sizeof(key));
+    bool needs_commit = false;
+    bool header_changed = false;
     err = nvs_erase_key(handle, key);
-    if (err != ESP_OK && err != ESP_ERR_NVS_NOT_FOUND) {
+    if (err == ESP_OK) {
+        needs_commit = true;
+    } else if (err != ESP_ERR_NVS_NOT_FOUND) {
         ZB_LOG("NVS cache: erase error for slot %u (%d)", idx, err);
     }
 
-    err = write_head(handle);
+    err = write_head_if_changed(handle, &header_changed);
     if (err != ESP_OK) {
         ZB_LOG("NVS cache: header update failed after delete (%d)", err);
-    } else {
-        nvs_commit(handle);
-        ZB_LOG("NVS cache: deleted slot %u", idx);
+    } else if (header_changed) {
+        needs_commit = true;
+    }
+
+    if (needs_commit) {
+        err = nvs_commit(handle);
+        if (err != ESP_OK) {
+            ZB_LOG("NVS cache: commit failed after delete (%d)", err);
+        } else {
+            ZB_LOG("NVS cache: deleted slot %u", idx);
+        }
     }
     nvs_close(handle);
 }

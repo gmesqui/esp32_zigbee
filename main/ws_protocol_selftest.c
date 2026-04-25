@@ -7,6 +7,8 @@
 #include <stdio.h>
 #include <string.h>
 
+#define printf(...) utils_console_printf(__VA_ARGS__)
+
 typedef struct {
     uint16_t count;
     uint16_t errors;
@@ -250,4 +252,3 @@ ws_protocol_selftest_result_t ws_protocol_selftest_run(bool verbose)
 
     return result;
 }
-

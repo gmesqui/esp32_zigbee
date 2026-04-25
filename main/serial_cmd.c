@@ -5,6 +5,7 @@
 #include "button_handler.h"
 #include "report_config.h"
 #include "utils.h"
+#include "tcp_console.h"
 #include "ws_protocol_selftest.h"
 #include "sdkconfig.h"
 
@@ -34,11 +35,11 @@
 static const char *console_channel_name(void)
 {
 #if defined(CONFIG_ESP_CONSOLE_UART_DEFAULT) || defined(CONFIG_ESP_CONSOLE_UART_CUSTOM)
-    return "UART0";
+    return "UART0 + TCP";
 #elif defined(CONFIG_ESP_CONSOLE_USB_SERIAL_JTAG)
-    return "USB Serial/JTAG";
+    return "USB Serial/JTAG + TCP";
 #else
-    return "console";
+    return "TCP console";
 #endif
 }
 
@@ -60,15 +61,39 @@ static int console_read_bytes(uint8_t *buf, TickType_t timeout_ticks)
         return 0;
     }
 
+    const TickType_t poll_ticks = pdMS_TO_TICKS(20);
+    TickType_t start_tick = xTaskGetTickCount();
+
+    for (;;) {
+        int n = 0;
+
 #if defined(CONFIG_ESP_CONSOLE_UART_DEFAULT) || defined(CONFIG_ESP_CONSOLE_UART_CUSTOM)
-    return uart_read_bytes(CONFIG_ESP_CONSOLE_UART_NUM, buf, 1, timeout_ticks);
+        n = uart_read_bytes(CONFIG_ESP_CONSOLE_UART_NUM, buf, 1, 0);
 #elif defined(CONFIG_ESP_CONSOLE_USB_SERIAL_JTAG)
-    return usb_serial_jtag_read_bytes(buf, 1, timeout_ticks);
-#else
-    (void)timeout_ticks;
-    return 0;
+        n = usb_serial_jtag_read_bytes(buf, 1, 0);
 #endif
+        if (n > 0) {
+            return n;
+        }
+
+        n = tcp_console_read_bytes(buf, 1, 0);
+        if (n > 0) {
+            return n;
+        }
+
+        if (timeout_ticks == 0 ||
+            (xTaskGetTickCount() - start_tick) >= timeout_ticks) {
+            return 0;
+        }
+
+        TickType_t elapsed = xTaskGetTickCount() - start_tick;
+        TickType_t remaining = timeout_ticks - elapsed;
+        vTaskDelay(remaining < poll_ticks ? remaining : poll_ticks);
+    }
 }
+
+#define printf(...) utils_console_printf(__VA_ARGS__)
+#define putchar(c) utils_console_putchar(c)
 
 // ---------------------------------------------------------------------------
 // Interactive input helpers

@@ -21,6 +21,7 @@ idf_component_register(
         "zb_events.c"
         "eth_driver.c"
         "time_sync.c"
+        "tcp_console.c"
     INCLUDE_DIRS "."
     REQUIRES
         nvs_flash

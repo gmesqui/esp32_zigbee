@@ -1,11 +1,28 @@
 #include "utils.h"
 #include "device_manager.h"   // for device_state_t names
+#include "sdkconfig.h"
+#include "tcp_console.h"
 #include <sys/time.h>
 #include <time.h>
 #include <stdio.h>
 #include <string.h>
 #include <stdlib.h>
 #include "esp_timer.h"
+
+#if defined(CONFIG_ESP_CONSOLE_USB_SERIAL_JTAG)
+#include "driver/usb_serial_jtag.h"
+#endif
+
+#define CONSOLE_PRINTF_STACK_BUF 512
+
+static bool local_console_log_enabled(void)
+{
+#if defined(CONFIG_ESP_CONSOLE_USB_SERIAL_JTAG)
+    return usb_serial_jtag_is_connected();
+#else
+    return true;
+#endif
+}
 
 // ---------------------------------------------------------------------------
 // Timestamp
@@ -57,6 +74,78 @@ void utils_format_log_prefix(char *buf, size_t len)
              utc_tm.tm_min,
              utc_tm.tm_sec,
              tv.tv_usec / 1000L);
+}
+
+bool utils_console_log_enabled(void)
+{
+    return local_console_log_enabled() || tcp_console_is_connected();
+}
+
+size_t utils_console_write(const char *data, size_t len)
+{
+    if (!data || len == 0) {
+        return 0;
+    }
+
+    size_t written = 0;
+    if (local_console_log_enabled()) {
+        written += fwrite(data, 1, len, stdout);
+    }
+
+    if (tcp_console_is_connected()) {
+        written += tcp_console_write(data, len);
+    }
+
+    return written;
+}
+
+int utils_console_vprintf(const char *fmt, va_list ap)
+{
+    if (!fmt) {
+        return 0;
+    }
+
+    char stack_buf[CONSOLE_PRINTF_STACK_BUF];
+    va_list ap_copy;
+    va_copy(ap_copy, ap);
+    int needed = vsnprintf(stack_buf, sizeof(stack_buf), fmt, ap_copy);
+    va_end(ap_copy);
+
+    if (needed < 0) {
+        return needed;
+    }
+
+    if ((size_t)needed < sizeof(stack_buf)) {
+        utils_console_write(stack_buf, (size_t)needed);
+        return needed;
+    }
+
+    char *heap_buf = malloc((size_t)needed + 1u);
+    if (!heap_buf) {
+        utils_console_write(stack_buf, sizeof(stack_buf) - 1u);
+        return needed;
+    }
+
+    vsnprintf(heap_buf, (size_t)needed + 1u, fmt, ap);
+    utils_console_write(heap_buf, (size_t)needed);
+    free(heap_buf);
+    return needed;
+}
+
+int utils_console_printf(const char *fmt, ...)
+{
+    va_list ap;
+    va_start(ap, fmt);
+    int ret = utils_console_vprintf(fmt, ap);
+    va_end(ap);
+    return ret;
+}
+
+int utils_console_putchar(int c)
+{
+    char ch = (char)c;
+    utils_console_write(&ch, 1);
+    return (unsigned char)ch;
 }
 
 // ---------------------------------------------------------------------------

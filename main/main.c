@@ -14,6 +14,7 @@
 #include "zb_events.h"
 #include "eth_driver.h"
 #include "time_sync.h"
+#include "tcp_console.h"
 #include "client_events.h"
 #include "ws_transport.h"
 
@@ -61,6 +62,7 @@ void app_main(void)
     zcl_handler_init();
 
     // 8. WebSocket transport and neutral client event bridge
+    tcp_console_init(eth_eg);
     ws_transport_init(eth_eg);
     client_events_init();
 

@@ -1,5 +1,6 @@
 #pragma once
 #include <stdbool.h>
+#include <stdarg.h>
 #include <stddef.h>
 #include <stdint.h>
 #include <stdio.h>
@@ -19,6 +20,17 @@ bool utils_wall_time_valid(void);
 
 /** Formats a log prefix with wall-clock time or fallback uptime. */
 void utils_format_log_prefix(char *buf, size_t len);
+
+/** Returns true when console logging should emit bytes. */
+bool utils_console_log_enabled(void);
+
+/** Write bytes to every active console sink. */
+size_t utils_console_write(const char *data, size_t len);
+
+/** Formatted console output routed to every active console sink. */
+int utils_console_vprintf(const char *fmt, va_list ap);
+int utils_console_printf(const char *fmt, ...);
+int utils_console_putchar(int c);
 
 // ---------------------------------------------------------------------------
 // IEEE address helpers
@@ -53,14 +65,20 @@ const char *utils_device_state_name(int state);
 
 #define ZB_LOG(fmt, ...)                                                     \
     do {                                                                     \
-        char _zb_log_prefix[32];                                             \
-        utils_format_log_prefix(_zb_log_prefix, sizeof(_zb_log_prefix));     \
-        printf("[%s] " fmt "\n", _zb_log_prefix, ##__VA_ARGS__);             \
+        if (utils_console_log_enabled()) {                                    \
+            char _zb_log_prefix[32];                                         \
+            utils_format_log_prefix(_zb_log_prefix, sizeof(_zb_log_prefix)); \
+            utils_console_printf("[%s] " fmt "\n",                          \
+                                 _zb_log_prefix, ##__VA_ARGS__);             \
+        }                                                                    \
     } while (0)
 
 #define ZB_PRINT(fmt, ...)                                                   \
     do {                                                                     \
-        char _zb_log_prefix[32];                                             \
-        utils_format_log_prefix(_zb_log_prefix, sizeof(_zb_log_prefix));     \
-        printf("[%s] " fmt, _zb_log_prefix, ##__VA_ARGS__);                  \
+        if (utils_console_log_enabled()) {                                    \
+            char _zb_log_prefix[32];                                         \
+            utils_format_log_prefix(_zb_log_prefix, sizeof(_zb_log_prefix)); \
+            utils_console_printf("[%s] " fmt,                                \
+                                 _zb_log_prefix, ##__VA_ARGS__);             \
+        }                                                                    \
     } while (0)
