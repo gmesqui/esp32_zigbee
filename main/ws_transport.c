@@ -31,6 +31,7 @@
 #include <stdlib.h>
 #include <string.h>
 #include <time.h>
+#include <unistd.h>
 
 #define WS_URI             "/ws"
 #define WS_HTTP_PORT       8080
@@ -790,6 +791,7 @@ static void ws_close_fn(httpd_handle_t hd, int sockfd)
         ZB_LOG("WS client disconnected fd=%d", sockfd);
         log_tx_metrics("disconnect");
     }
+    close(sockfd);
 }
 
 static const char s_web_index_html[] =
@@ -917,9 +919,17 @@ static const char s_web_index_html[] =
 "populateTimezones();setupConfigDirty();showPage();load(true).catch(e=>setMsg('Error: '+e.message));setInterval(()=>{if(autoRefresh)load(false).catch(()=>{})},5000);"
 "</script></body></html>";
 
+static void web_resp_close_after_send(httpd_req_t *req)
+{
+    if (req) {
+        httpd_resp_set_hdr(req, "Connection", "close");
+    }
+}
+
 static esp_err_t web_send_json(httpd_req_t *req, cJSON *root)
 {
     if (!root) {
+        web_resp_close_after_send(req);
         httpd_resp_send_err(req, HTTPD_500_INTERNAL_SERVER_ERROR,
                             "Unable to build JSON");
         return ESP_FAIL;
@@ -932,11 +942,13 @@ static esp_err_t web_send_json(httpd_req_t *req, cJSON *root)
                (unsigned)esp_get_free_heap_size(),
                (unsigned)esp_get_minimum_free_heap_size(),
                (unsigned)heap_caps_get_largest_free_block(MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT));
+        web_resp_close_after_send(req);
         httpd_resp_send_err(req, HTTPD_500_INTERNAL_SERVER_ERROR,
                             "Unable to serialize JSON");
         return ESP_FAIL;
     }
 
+    web_resp_close_after_send(req);
     httpd_resp_set_type(req, "application/json");
     esp_err_t err = httpd_resp_sendstr(req, text);
     free(text);
@@ -950,6 +962,7 @@ static esp_err_t web_send_error_json(httpd_req_t *req,
 {
     cJSON *root = cJSON_CreateObject();
     if (!root) {
+        web_resp_close_after_send(req);
         httpd_resp_send_err(req, status, message ? message : "error");
         return ESP_FAIL;
     }
@@ -973,6 +986,7 @@ static void web_json_stream_init(web_json_stream_t *s, httpd_req_t *req)
     memset(s, 0, sizeof(*s));
     s->req = req;
     s->err = ESP_OK;
+    web_resp_close_after_send(req);
     httpd_resp_set_type(req, "application/json");
 }
 
@@ -1141,6 +1155,7 @@ static void json_add_config(cJSON *root)
 
 static esp_err_t web_index_handler(httpd_req_t *req)
 {
+    web_resp_close_after_send(req);
     httpd_resp_set_type(req, "text/html; charset=utf-8");
     return httpd_resp_send(req, s_web_index_html, HTTPD_RESP_USE_STRLEN);
 }
