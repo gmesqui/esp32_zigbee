@@ -221,10 +221,13 @@ Canal interactivo segun target:
 
 ## Formato de log
 
-Todos los logs usan timestamp relativo al arranque:
+Cuando el reloj SNTP ya es valido, los logs usan fecha y hora local segun la
+zona horaria configurada. Mientras el reloj no sea valido, usan timestamp
+relativo al arranque:
 
 ```
-[T+%07.3f]  →  [T+012.345]
+[2026-04-26 20:35:12.123]
+[T+%07.3f]  ->  [T+012.345]
 ```
 
 Por cada mensaje ZCL/ZDO se emiten hasta 3 lineas:

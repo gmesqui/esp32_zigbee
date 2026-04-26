@@ -16,16 +16,21 @@
 #include "zigbee_core.h"
 
 #include "cJSON.h"
+#include "esp_app_desc.h"
 #include "esp_http_server.h"
 #include "esp_heap_caps.h"
+#include "esp_ota_ops.h"
+#include "esp_partition.h"
 #include "esp_system.h"
 #include "esp_timer.h"
 #include "esp_zigbee_core.h"
 #include "freertos/semphr.h"
 #include "freertos/task.h"
+#include <stdarg.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <time.h>
 
 #define WS_URI             "/ws"
 #define WS_HTTP_PORT       8080
@@ -46,6 +51,8 @@
 #define WS_NOTIFY_INVENTORY_REFRESH BIT1
 #define WEB_API_BODY_MAX 1024
 #define WEB_ZB_LOCK_WAIT_MS 100
+#define WEB_EVENT_HISTORY_LEN 24
+#define WEB_JSON_CHUNK_SIZE 768
 
 typedef enum {
     WS_TX_PRIORITY_TELEMETRY = 0,
@@ -87,12 +94,143 @@ static portMUX_TYPE s_refresh_lock = portMUX_INITIALIZER_UNLOCKED;
 static bool s_inventory_refresh_pending;
 static TickType_t s_inventory_refresh_due_tick;
 
+typedef struct {
+    bool in_use;
+    uint32_t ts_s;
+    zb_evt_type_t type;
+    uint64_t ieee;
+    char friendly_name[ZB_EVT_NAME_LEN];
+    bool online;
+    uint8_t endpoint;
+    uint16_t cluster_id;
+    uint16_t attr_id;
+    uint8_t permit_join_duration;
+    char status[16];
+} web_event_entry_t;
+
+static web_event_entry_t s_web_events[WEB_EVENT_HISTORY_LEN];
+static uint32_t s_web_event_seq;
+static portMUX_TYPE s_web_event_lock = portMUX_INITIALIZER_UNLOCKED;
+
 static void clear_inventory_refresh(void)
 {
     portENTER_CRITICAL(&s_refresh_lock);
     s_inventory_refresh_pending = false;
     s_inventory_refresh_due_tick = 0;
     portEXIT_CRITICAL(&s_refresh_lock);
+}
+
+static const char *web_event_type_name(zb_evt_type_t type)
+{
+    switch (type) {
+        case ZB_EVT_DEVICE_JOINED:
+            return "device_joined";
+        case ZB_EVT_DEVICE_LEAVE:
+            return "device_left";
+        case ZB_EVT_DEVICE_UPDATED:
+            return "device_updated";
+        case ZB_EVT_INTERVIEW:
+            return "interview";
+        case ZB_EVT_ATTR_CHANGED:
+            return "attribute";
+        case ZB_EVT_AVAILABILITY:
+            return "availability";
+        case ZB_EVT_PERMIT_JOIN:
+            return "permit_join";
+        default:
+            return "event";
+    }
+}
+
+static void web_events_record_zigbee(const zb_event_t *evt)
+{
+    if (!evt) {
+        return;
+    }
+
+    web_event_entry_t entry = {
+        .in_use = true,
+        .ts_s = utils_uptime_ms() / 1000u,
+        .type = evt->type,
+        .ieee = evt->ieee,
+        .online = evt->online,
+        .endpoint = evt->endpoint,
+        .cluster_id = evt->cluster_id,
+        .attr_id = evt->attr_id,
+        .permit_join_duration = evt->permit_join_duration,
+    };
+    strncpy(entry.friendly_name, evt->friendly_name,
+            sizeof(entry.friendly_name) - 1);
+    if (evt->interview_status) {
+        strncpy(entry.status, evt->interview_status, sizeof(entry.status) - 1);
+    }
+
+    portENTER_CRITICAL(&s_web_event_lock);
+    s_web_events[s_web_event_seq % WEB_EVENT_HISTORY_LEN] = entry;
+    s_web_event_seq++;
+    portEXIT_CRITICAL(&s_web_event_lock);
+}
+
+static void web_events_record_action(const char *status, uint64_t ieee,
+                                     const char *friendly_name)
+{
+    web_event_entry_t entry = {
+        .in_use = true,
+        .ts_s = utils_uptime_ms() / 1000u,
+        .type = ZB_EVT_DEVICE_UPDATED,
+        .ieee = ieee,
+    };
+    if (status) {
+        strncpy(entry.status, status, sizeof(entry.status) - 1);
+    }
+    if (friendly_name) {
+        strncpy(entry.friendly_name, friendly_name,
+                sizeof(entry.friendly_name) - 1);
+    }
+
+    portENTER_CRITICAL(&s_web_event_lock);
+    s_web_events[s_web_event_seq % WEB_EVENT_HISTORY_LEN] = entry;
+    s_web_event_seq++;
+    portEXIT_CRITICAL(&s_web_event_lock);
+}
+
+static const char *reset_reason_name(esp_reset_reason_t reason)
+{
+    switch (reason) {
+        case ESP_RST_POWERON:
+            return "power_on";
+        case ESP_RST_EXT:
+            return "external";
+        case ESP_RST_SW:
+            return "software";
+        case ESP_RST_PANIC:
+            return "panic";
+        case ESP_RST_INT_WDT:
+            return "interrupt_watchdog";
+        case ESP_RST_TASK_WDT:
+            return "task_watchdog";
+        case ESP_RST_WDT:
+            return "watchdog";
+        case ESP_RST_DEEPSLEEP:
+            return "deep_sleep";
+        case ESP_RST_BROWNOUT:
+            return "brownout";
+        case ESP_RST_SDIO:
+            return "sdio";
+        case ESP_RST_USB:
+            return "usb";
+        case ESP_RST_JTAG:
+            return "jtag";
+        case ESP_RST_EFUSE:
+            return "efuse";
+        case ESP_RST_PWR_GLITCH:
+            return "power_glitch";
+        case ESP_RST_CPU_LOCKUP:
+            return "cpu_lockup";
+        case ESP_RST_UNKNOWN:
+        default:
+            return "unknown";
+    }
 }
 
 static const char *tx_priority_name(ws_tx_priority_t priority)
@@ -661,51 +799,85 @@ static const char s_web_index_html[] =
 ":root{color-scheme:light dark;font-family:system-ui,-apple-system,Segoe UI,sans-serif}"
 "body{margin:0;background:#f5f7f9;color:#172026}"
 "header{background:#172026;color:#fff;padding:18px 22px}"
+"nav{background:#24313b;padding:0 22px;display:flex;gap:4px;flex-wrap:wrap}nav a{color:#edf2f6;text-decoration:none;padding:10px 12px;border-bottom:3px solid transparent}nav a.active{border-color:#69aee8;background:#172026}"
 "main{max-width:1120px;margin:0 auto;padding:18px;display:grid;gap:16px}"
-"section{background:#fff;border:1px solid #d8dee4;border-radius:8px;padding:16px}"
+"section{background:#fff;border:1px solid #d8dee4;border-radius:8px;padding:16px}.page{display:none}.page.active{display:block}"
 "h1{font-size:22px;margin:0}h2{font-size:17px;margin:0 0 12px}"
 ".grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(180px,1fr));gap:10px}"
 ".metric{border:1px solid #e4e8ec;border-radius:6px;padding:10px;background:#fbfcfd}"
+".panel{margin-top:12px;border-top:1px solid #e6ebef;padding-top:12px;display:grid;grid-template-columns:repeat(auto-fit,minmax(220px,1fr));gap:8px}.panel strong{display:block;margin-top:2px}"
+".stack{display:grid;gap:12px}.deviceTitle{display:flex;justify-content:space-between;gap:10px;align-items:flex-start;flex-wrap:wrap}.pill{display:inline-block;border-radius:999px;padding:3px 8px;background:#eaf1f7;color:#394650;font-size:12px;margin:2px 4px 2px 0}"
 ".label{font-size:12px;color:#66727c}.value{font-size:20px;font-weight:650;margin-top:4px}"
 "label{display:grid;gap:5px;font-size:13px;color:#394650}input{font:inherit;padding:9px;border:1px solid #c8d0d8;border-radius:6px}"
 "button{font:inherit;border:0;border-radius:6px;padding:9px 12px;background:#145c9e;color:#fff;cursor:pointer}"
-"button.secondary{background:#596775}button.warn{background:#a33b21}.actions{display:flex;gap:8px;flex-wrap:wrap;margin-top:12px}"
+"a{color:#145c9e}a.small{display:inline-block;text-decoration:none;border-radius:6px;background:#145c9e;color:#fff}button.secondary,a.secondary{background:#596775}button.warn{background:#a33b21}.actions{display:flex;gap:8px;flex-wrap:wrap;margin-top:12px}"
 "table{width:100%;border-collapse:collapse;font-size:13px}th,td{text-align:left;padding:8px;border-bottom:1px solid #e6ebef}"
 ".rename{display:flex;gap:6px;align-items:center}.rename input{min-width:120px;max-width:190px;padding:7px}.small{padding:7px 9px;font-size:12px}"
+".toolbar{display:flex;gap:8px;align-items:end;flex-wrap:wrap;margin-bottom:10px}.toolbar label{min-width:180px}select{font:inherit;padding:9px;border:1px solid #c8d0d8;border-radius:6px;background:#fff}.detail{margin-top:8px;color:#596775}.events{display:grid;gap:6px}.event{display:grid;grid-template-columns:80px 130px 1fr;gap:8px;border-bottom:1px solid #e6ebef;padding:7px 0;font-size:13px}"
 ".ok{color:#167145}.bad{color:#a33b21}.msg{min-height:20px;color:#596775;font-size:13px}"
-"@media (prefers-color-scheme:dark){body{background:#11171c;color:#edf2f6}section{background:#172026;border-color:#2a3540}.metric{background:#1d2730;border-color:#2f3a45}.label{color:#aeb9c2}input{background:#11171c;color:#edf2f6;border-color:#3b4854}th,td{border-color:#2a3540}}"
-"</style></head><body><header><h1>ESP32 Zigbee Coordinator</h1></header><main>"
-"<section><h2>Estado</h2><div class=\"grid\" id=\"metrics\"></div></section>"
-"<section><h2>Configuracion</h2><div class=\"grid\">"
+"@media (prefers-color-scheme:dark){body{background:#11171c;color:#edf2f6}section{background:#172026;border-color:#2a3540}.metric{background:#1d2730;border-color:#2f3a45}.panel{border-color:#2a3540}.pill{background:#24313b;color:#d8e2ea}.label{color:#aeb9c2}input,select{background:#11171c;color:#edf2f6;border-color:#3b4854}th,td,.event{border-color:#2a3540}.detail{color:#aeb9c2}}"
+"</style></head><body><header><h1>ESP32 Zigbee Coordinator</h1></header>"
+"<nav><a href=\"/\" data-page=\"status\">Estado</a><a href=\"/devices\" data-page=\"devices\">Dispositivos</a><a href=\"/zigbee\" data-page=\"zigbee\">Zigbee</a><a href=\"/network\" data-page=\"network\">Red</a><a href=\"/events\" data-page=\"events\">Eventos</a><a href=\"/config\" data-page=\"config\">Configuracion</a><a href=\"/actions\" data-page=\"actions\">Acciones</a></nav><main>"
+"<section class=\"page\" id=\"page-status\"><h2>Estado</h2><div class=\"actions\"><button class=\"secondary\" id=\"autoRefresh\">Pausar auto-refresh</button><button class=\"secondary\" id=\"exportJson\">Exportar JSON</button></div><div class=\"grid\" id=\"metrics\"></div><h2>Diagnostico</h2><div class=\"panel\" id=\"systemDiag\"></div></section>"
+"<section class=\"page\" id=\"page-config\"><h2>Configuracion</h2><div class=\"grid\">"
 "<label>Nombre mDNS<input id=\"mdns_hostname\" maxlength=\"31\"></label>"
 "<label>Nombre visible<input id=\"mdns_instance\" maxlength=\"63\"></label>"
 "<label>Servidor NTP<input id=\"ntp_server\" maxlength=\"63\"></label>"
-"<label>Zona horaria POSIX<input id=\"timezone\" maxlength=\"47\"></label>"
+"<label>Zona horaria POSIX<select id=\"timezone\"></select></label>"
+"<div class=\"metric\"><div class=\"label\">Fecha/hora actual</div><div class=\"value\" id=\"current_time\">-</div><div class=\"detail\" id=\"current_time_detail\">-</div></div>"
 "<label>Join por defecto (s)<input id=\"permit_join_duration_s\" type=\"number\" min=\"10\" max=\"254\"></label>"
 "</div><h2>Reporting</h2><div class=\"grid\">"
 "<label>Max always-on (s)<input id=\"report_always_on_max_s\" type=\"number\" min=\"30\" max=\"3600\"></label>"
 "<label>Max sleepy (s)<input id=\"report_sleepy_max_s\" type=\"number\" min=\"300\" max=\"43200\"></label>"
 "<label>Margen presencia (s)<input id=\"presence_grace_s\" type=\"number\" min=\"5\" max=\"3600\"></label>"
 "</div><div class=\"actions\"><button id=\"save\">Guardar</button><button class=\"secondary\" id=\"refresh\">Actualizar</button></div><div class=\"msg\" id=\"msg\"></div></section>"
-"<section><h2>Join</h2><div class=\"actions\"><button id=\"joinOpen\">Abrir join</button><button class=\"warn\" id=\"joinClose\">Cerrar join</button></div></section>"
-"<section><h2>Acciones</h2><div class=\"actions\"><button class=\"secondary\" id=\"timeResync\">Sincronizar hora</button><button class=\"secondary\" id=\"configureAll\">Reconfigurar reporting en todos</button><button class=\"secondary\" id=\"closeWs\">Cerrar WebSocket</button><button class=\"warn\" id=\"eraseCache\">Borrar cache dispositivos</button><button class=\"warn\" id=\"reboot\">Reiniciar</button><button class=\"warn\" id=\"zbReset\">Reset red Zigbee</button></div></section>"
-"<section><h2>Dispositivos</h2><table><thead><tr><th>Nombre</th><th>IEEE</th><th>Estado</th><th>Lecturas</th><th>Modelo</th><th>Acciones</th></tr></thead><tbody id=\"devices\"></tbody></table></section>"
+"<section class=\"page\" id=\"page-actions\"><h2>Join</h2><div class=\"actions\"><button id=\"joinOpen\">Abrir join</button><button class=\"warn\" id=\"joinClose\">Cerrar join</button></div><h2>Acciones</h2><div class=\"actions\"><button class=\"secondary\" id=\"timeResync\">Sincronizar hora</button><button class=\"secondary\" id=\"configureAll\">Reconfigurar reporting en todos</button><button class=\"secondary\" id=\"closeWs\">Cerrar WebSocket</button><button class=\"warn\" id=\"eraseCache\">Borrar cache dispositivos</button><button class=\"warn\" id=\"reboot\">Reiniciar</button><button class=\"warn\" id=\"zbReset\">Reset red Zigbee</button></div></section>"
+"<section class=\"page\" id=\"page-devices\"><h2>Dispositivos</h2><div class=\"toolbar\"><label>Buscar<input id=\"deviceSearch\" placeholder=\"nombre, IEEE o modelo\"></label><label>Filtro<select id=\"deviceFilter\"><option value=\"all\">Todos</option><option value=\"online\">Online</option><option value=\"offline\">Offline</option><option value=\"sleepy\">Sleepy</option><option value=\"router\">Routers / always-on</option><option value=\"reporting\">Reporting pendiente</option></select></label></div><table><thead><tr><th>Nombre</th><th>IEEE</th><th>Estado</th><th>Lecturas</th><th>Modelo</th><th>Acciones</th></tr></thead><tbody id=\"devices\"></tbody></table></section>"
+"<section class=\"page\" id=\"page-device\"><div id=\"devicePage\" class=\"stack\"></div></section>"
+"<section class=\"page\" id=\"page-zigbee\"><h2>Salud Zigbee</h2><div class=\"grid\" id=\"zigbeeMetrics\"></div><div class=\"panel\" id=\"zigbeeDiag\"></div><h2>Actividad Zigbee</h2><div class=\"events\" id=\"zigbeeEvents\"></div></section>"
+"<section class=\"page\" id=\"page-network\"><h2>Red y servicios</h2><div class=\"grid\" id=\"networkMetrics\"></div><div class=\"panel\" id=\"networkDiag\"></div></section>"
+"<section class=\"page\" id=\"page-events\"><h2>Eventos recientes</h2><div class=\"events\" id=\"events\"></div></section>"
 "</main><script>"
-"let cfg={};"
+"let cfg={},lastStatus=null,autoRefresh=true,configDirty=false;"
+"const CONFIG_FIELD_IDS=['mdns_hostname','mdns_instance','ntp_server','timezone','permit_join_duration_s','report_always_on_max_s','report_sleepy_max_s','presence_grace_s'];"
+"const TZ_OPTIONS=["
+"{v:'UTC12',l:'UTC-12:00 - fija'},{v:'UTC11',l:'UTC-11:00 - fija'},{v:'HST10',l:'UTC-10:00 - Hawai (HST)'},{v:'UTC9:30',l:'UTC-09:30 - fija'},{v:'AKST9AKDT,M3.2.0,M11.1.0',l:'UTC-09:00 / -08:00 - Alaska'},{v:'PST8PDT,M3.2.0,M11.1.0',l:'UTC-08:00 / -07:00 - Pacifico'},{v:'MST7MDT,M3.2.0,M11.1.0',l:'UTC-07:00 / -06:00 - Montana'},{v:'MST7',l:'UTC-07:00 - Arizona/MST fija'},{v:'CST6CDT,M3.2.0,M11.1.0',l:'UTC-06:00 / -05:00 - Central US'},{v:'EST5EDT,M3.2.0,M11.1.0',l:'UTC-05:00 / -04:00 - Este US'},{v:'EST5',l:'UTC-05:00 - EST fija'},{v:'UTC4',l:'UTC-04:00 - fija'},{v:'UTC3:30',l:'UTC-03:30 - fija'},{v:'UTC3',l:'UTC-03:00 - fija'},{v:'UTC2',l:'UTC-02:00 - fija'},{v:'UTC1',l:'UTC-01:00 - fija'},"
+"{v:'UTC0',l:'UTC+00:00 - UTC/GMT'},{v:'GMT0BST,M3.5.0/1,M10.5.0',l:'UTC+00:00 / +01:00 - Reino Unido'},{v:'WET0WEST,M3.5.0/1,M10.5.0',l:'UTC+00:00 / +01:00 - Europa oeste'},"
+"{v:'UTC-1',l:'UTC+01:00 - fija'},{v:'CET-1CEST,M3.5.0,M10.5.0/3',l:'UTC+01:00 / +02:00 - Europa central'},{v:'UTC-2',l:'UTC+02:00 - fija'},{v:'EET-2EEST,M3.5.0/3,M10.5.0/4',l:'UTC+02:00 / +03:00 - Europa este'},{v:'UTC-3',l:'UTC+03:00 - fija'},{v:'UTC-3:30',l:'UTC+03:30 - fija'},{v:'UTC-4',l:'UTC+04:00 - fija'},{v:'UTC-4:30',l:'UTC+04:30 - fija'},{v:'UTC-5',l:'UTC+05:00 - fija'},{v:'UTC-5:30',l:'UTC+05:30 - India'},{v:'UTC-5:45',l:'UTC+05:45 - Nepal'},{v:'UTC-6',l:'UTC+06:00 - fija'},{v:'UTC-6:30',l:'UTC+06:30 - fija'},{v:'UTC-7',l:'UTC+07:00 - fija'},{v:'UTC-8',l:'UTC+08:00 - fija'},{v:'UTC-8:45',l:'UTC+08:45 - fija'},{v:'JST-9',l:'UTC+09:00 - Japon/Corea'},{v:'UTC-9:30',l:'UTC+09:30 - fija'},{v:'ACST-9:30ACDT,M10.1.0,M4.1.0/3',l:'UTC+09:30 / +10:30 - Australia central'},{v:'UTC-10',l:'UTC+10:00 - fija'},{v:'AEST-10AEDT,M10.1.0,M4.1.0/3',l:'UTC+10:00 / +11:00 - Australia este'},{v:'UTC-10:30',l:'UTC+10:30 - fija'},{v:'UTC-11',l:'UTC+11:00 - fija'},{v:'UTC-12',l:'UTC+12:00 - fija'},{v:'NZST-12NZDT,M9.5.0,M4.1.0/3',l:'UTC+12:00 / +13:00 - Nueva Zelanda'},{v:'UTC-12:45',l:'UTC+12:45 - fija'},{v:'UTC-13',l:'UTC+13:00 - fija'},{v:'UTC-14',l:'UTC+14:00 - fija'}];"
 "async function j(url,opt){const r=await fetch(url,opt);if(!r.ok)throw new Error(await r.text()||r.status);return r.json();}"
 "function esc(v){return String(v==null?'':v).replace(/[&<>'\"]/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;',\"'\":'&#39;','\"':'&quot;'}[c]));}"
 "function setMsg(t){document.getElementById('msg').textContent=t||'';}"
 "function metric(label,value,cls){return `<div class=\"metric\"><div class=\"label\">${label}</div><div class=\"value ${cls||''}\">${value}</div></div>`}"
 "function readings(d){let r=d.readings||{},a=[];for(const k of Object.keys(r)){let x=r[k];a.push(`${esc(k)}: ${esc(x.value)}${x.unit?' '+esc(x.unit):''}`)}return a.join('<br>')||'-'}"
-"async function load(){const s=await j('/api/status');cfg=s.config;"
-"document.getElementById('mdns_hostname').value=cfg.mdns_hostname;"
-"document.getElementById('mdns_instance').value=cfg.mdns_instance;"
-"document.getElementById('ntp_server').value=cfg.ntp_server;"
-"document.getElementById('timezone').value=cfg.timezone;"
-"document.getElementById('permit_join_duration_s').value=cfg.permit_join_duration_s;"
-"document.getElementById('report_always_on_max_s').value=cfg.report_always_on_max_s;"
-"document.getElementById('report_sleepy_max_s').value=cfg.report_sleepy_max_s;"
-"document.getElementById('presence_grace_s').value=cfg.presence_grace_s;"
+"function ago(ts){let d=Math.max(0,Math.floor((lastStatus.system.uptime_s||0)-ts));return d<60?d+'s':Math.floor(d/60)+'m'}"
+"function bytes(n){if(n==null)return '-';return n>=1048576?(n/1048576).toFixed(1)+' MB':n>=1024?(n/1024).toFixed(1)+' KB':n+' B'}"
+"function hex(n){return n==null?'-':'0x'+Number(n).toString(16).toUpperCase()}"
+"function clusters(a){return (a||[]).map(x=>'0x'+Number(x).toString(16).padStart(4,'0').toUpperCase()).join(', ')||'-'}"
+"function detail(d){let eps=(d.endpoints||[]).map(e=>`EP ${e.id} ${esc(e.device_type)}<br>in: ${clusters(e.in_clusters)}<br>out: ${clusters(e.out_clusters)}`).join('<hr>')||'-';let st=d.stats||{};let rp=d.reporting||{};return `<details class=\"detail\"><summary>Detalle</summary><div>${eps}<hr>reporting ${rp.received||0}/${rp.expected||0}, fallos ${rp.failed||0}<br>reports ${st.report_attr_ok||0}, unchanged ${st.report_attr_unchanged||0}, read ok/fail ${st.read_rsp_ok||0}/${st.read_rsp_fail||0}</div></details>`}"
+"function passFilter(d,q,f){let hay=(d.name+' '+d.ieee+' '+(d.model||'')+' '+(d.manufacturer||'')).toLowerCase();if(q&&hay.indexOf(q)<0)return false;if(f==='online')return d.online;if(f==='offline')return !d.online;if(f==='sleepy')return d.is_sleepy;if(f==='router')return !d.is_sleepy;if(f==='reporting')return !d.reporting||!d.reporting.configured||d.reporting.in_progress;return true}"
+"function deviceById(id){id=String(id||'').toLowerCase();return (lastStatus&&lastStatus.devices||[]).find(d=>String(d.ieee).toLowerCase()===id)}"
+"function editingDeviceName(){let el=document.activeElement;return el&&el.tagName==='INPUT'&&(el.id==='deviceName'||el.id.indexOf('name_')===0)}"
+"function setupConfigDirty(){CONFIG_FIELD_IDS.forEach(id=>{let el=document.getElementById(id);if(!el)return;el.addEventListener('input',()=>configDirty=true);el.addEventListener('change',()=>configDirty=true)})}"
+"function fillConfigForm(force){if(!cfg||(!force&&configDirty))return;document.getElementById('mdns_hostname').value=cfg.mdns_hostname;document.getElementById('mdns_instance').value=cfg.mdns_instance;document.getElementById('ntp_server').value=cfg.ntp_server;ensureTimezoneOption(cfg.timezone);document.getElementById('timezone').value=cfg.timezone;document.getElementById('permit_join_duration_s').value=cfg.permit_join_duration_s;document.getElementById('report_always_on_max_s').value=cfg.report_always_on_max_s;document.getElementById('report_sleepy_max_s').value=cfg.report_sleepy_max_s;document.getElementById('presence_grace_s').value=cfg.presence_grace_s;configDirty=false}"
+"function attrRows(d){let r=d.readings||{};let rows=Object.keys(r).map(k=>{let x=r[k];return `<tr><td>${esc(k)}</td><td>${esc(x.value)}${x.unit?' '+esc(x.unit):''}</td><td>${x.endpoint||'-'}</td><td>${hex(x.cluster_id)}</td><td>${hex(x.attr_id)}</td><td>${ago(x.ts||0)}</td></tr>`}).join('');let raw=(d.attrs||[]).map(a=>`<tr><td>raw</td><td>${esc(a.raw)}</td><td>${a.endpoint}</td><td>${hex(a.cluster_id)}</td><td>${hex(a.attr_id)} / t ${hex(a.attr_type)}</td><td>${ago(a.ts||0)}</td></tr>`).join('');return rows+raw}"
+"function endpointRows(d){return (d.endpoints||[]).map(e=>`<tr><td>${e.id}</td><td>${hex(e.profile_id)}</td><td>${hex(e.device_id)}<br>${esc(e.device_type)}</td><td>${clusters(e.in_clusters)}</td><td>${clusters(e.out_clusters)}</td></tr>`).join('')}"
+"function renderDevices(){let s=lastStatus;if(!s||editingDeviceName())return;let q=document.getElementById('deviceSearch').value.toLowerCase();let f=document.getElementById('deviceFilter').value;let rows=s.devices.filter(d=>passFilter(d,q,f)).map((d,i)=>`<tr><td><a href=\"/device?id=${encodeURIComponent(d.ieee)}\">${esc(d.name)}</a>${detail(d)}</td><td>${esc(d.ieee)}</td><td class=\"${d.online?'ok':'bad'}\">${d.online?'online':'offline'} / ${esc(d.state)}<br>reporting: ${d.reporting&&d.reporting.configured?'ok':'pendiente'}<br>${d.is_sleepy?'sleepy':'router'}</td><td>${readings(d)}</td><td>${esc(d.manufacturer||'-')} ${esc(d.model||'')}<br>${esc(d.power_source||'')}</td><td><div class=\"rename\"><input id=\"name_${i}\" value=\"${esc(d.name)}\"><button class=\"small\" onclick=\"renameDev('${d.ieee}',document.getElementById('name_${i}').value)\">Guardar</button></div><div class=\"actions\"><a class=\"small\" href=\"/device?id=${encodeURIComponent(d.ieee)}\">Abrir</a><button class=\"small secondary\" onclick=\"devAction('/api/device/reinterview','${d.ieee}')\">Re-entrevistar</button><button class=\"small secondary\" onclick=\"devAction('/api/device/configure','${d.ieee}')\">Reporting</button></div></td></tr>`).join('');document.getElementById('devices').innerHTML=rows||'<tr><td colspan=\"6\">Sin dispositivos</td></tr>'}"
+"function renderEvents(){let s=lastStatus;if(!s)return;document.getElementById('events').innerHTML=(s.events||[]).map(e=>`<div class=\"event\"><span>${ago(e.ts)}</span><span>${esc(e.type)}</span><span>${esc(e.name||e.device_id||'sistema')} ${e.status?'- '+esc(e.status):''}${e.duration!=null?' ('+e.duration+'s)':''}</span></div>`).join('')||'<div class=\"msg\">Sin eventos recientes</div>'}"
+"function renderSystem(){let s=lastStatus;if(!s)return;let y=s.system||{};let rows=[['Firmware',esc((y.app_name||'app')+' '+(y.app_version||''))],['IDF',esc(y.idf_version||'-')],['Build',esc((y.build_date||'-')+' '+(y.build_time||''))],['Reset',esc(y.reset_reason||'-')],['Heap libre',bytes(y.free_heap)],['Heap interno',bytes(y.free_internal_heap)],['Heap minimo',bytes(y.min_free_heap)],['Particion',esc(y.partition_label||'-')+' / '+bytes(y.partition_size)+' @ '+hex(y.partition_address)]];document.getElementById('systemDiag').innerHTML=rows.map(x=>`<div><span class=\"label\">${x[0]}</span><strong>${x[1]}</strong></div>`).join('')}"
+"function panel(rows){return rows.map(x=>`<div><span class=\"label\">${x[0]}</span><strong>${x[1]}</strong></div>`).join('')}"
+"function tzLabel(v){let o=TZ_OPTIONS.find(x=>x.v===v);return o?o.l:v}"
+"function ensureTimezoneOption(v){let sel=document.getElementById('timezone');if(!v||[...sel.options].some(o=>o.value===v))return;let o=document.createElement('option');o.value=v;o.textContent='Guardada - '+v;sel.appendChild(o)}"
+"function populateTimezones(){let sel=document.getElementById('timezone');sel.innerHTML='';TZ_OPTIONS.forEach(z=>{let o=document.createElement('option');o.value=z.v;o.textContent=z.l+' ['+z.v+']';sel.appendChild(o)})}"
+"function renderConfigTime(){let t=lastStatus&&lastStatus.time||{};let cur=document.getElementById('current_time'),det=document.getElementById('current_time_detail');if(!cur||!det)return;cur.textContent=t.current_local||'Hora no sincronizada';cur.className='value '+(t.valid?'ok':'bad');det.textContent=t.valid?((t.utc_offset||'UTC?')+' | UTC '+(t.current_utc||'-')):'Esperando sincronizacion NTP'}"
+"function renderNetwork(){let s=lastStatus;if(!s)return;let n=s.network||{},t=s.time||{},sv=s.services||{};document.getElementById('networkMetrics').innerHTML=[metric('Link',n.link_up?'activo':'caido',n.link_up?'ok':'bad'),metric('IP',n.has_ip?n.ip:'sin IP',n.has_ip?'ok':'bad'),metric('mDNS',cfg.mdns_hostname+'.local'),metric('NTP',t.synced?'sincronizado':'pendiente',t.synced?'ok':'bad'),metric('Hora',t.current_local||'sin sincronizar',t.valid?'ok':'bad'),metric('WebSocket',sv.websocket_client?'conectado':'sin cliente',sv.websocket_client?'ok':''),metric('TCP consola',sv.tcp_console_client?'conectada':'sin cliente',sv.tcp_console_client?'ok':'')].join('');document.getElementById('networkDiag').innerHTML=panel([['MAC',esc(n.mac||'-')],['IP',esc(n.ip||'-')],['Mascara',esc(n.netmask||'-')],['Gateway',esc(n.gateway||'-')],['mDNS',esc(cfg.mdns_hostname+'.local')],['Nombre visible',esc(cfg.mdns_instance||'-')],['Servidor NTP',esc(t.server||cfg.ntp_server||'-')],['Zona horaria',esc(tzLabel(t.timezone||cfg.timezone||'-'))],['Hora local',esc(t.current_local||'-')],['Hora UTC',esc(t.current_utc||'-')],['Offset UTC',esc(t.utc_offset||'-')],['Ultimo sync',t.last_sync_uptime_s?ago(t.last_sync_uptime_s):'-']])}"
+"function renderZigbee(){let s=lastStatus;if(!s)return;let z=s.zigbee||{},p=s.permit_join||{},u=s.summary||{};document.getElementById('zigbeeMetrics').innerHTML=[metric('Estado',z.ready?'listo':'iniciando',z.ready?'ok':'bad'),metric('Canal',z.ready?z.channel:'-'),metric('PAN ID',z.ready?hex(z.pan_id):'-'),metric('Join',p.active?('abierto '+p.remaining_s+'s'):'cerrado',p.active?'ok':''),metric('Dispositivos',s.device_count+'/'+s.device_capacity),metric('Online',s.online_devices),metric('Sleepy/router',(u.sleepy_devices||0)+'/'+(u.router_devices||0)),metric('Pendientes',(u.reporting_pending||0)+' reporting / '+(u.interview_active||0)+' entrevista',u.reporting_pending||u.interview_active?'bad':'ok')].join('');document.getElementById('zigbeeDiag').innerHTML=panel([['Extended PAN',esc(z.ext_pan_id||'-')],['Coordinador IEEE',esc(z.coordinator_ieee||'-')],['Canal/PAN',z.ready?esc(z.channel+' / '+hex(z.pan_id)):'-'],['Permit join',p.active?esc('abierto '+p.remaining_s+'s'):'cerrado'],['Routers / sleepy',(u.router_devices||0)+' / '+(u.sleepy_devices||0)],['Reporting pendiente',String(u.reporting_pending||0)],['Entrevistas activas',String(u.interview_active||0)]]);document.getElementById('zigbeeEvents').innerHTML=(s.events||[]).filter(e=>e.type!=='device_updated'||e.device_id).slice(0,12).map(e=>`<div class=\"event\"><span>${ago(e.ts)}</span><span>${esc(e.type)}</span><span>${esc(e.name||e.device_id||'sistema')} ${e.status?'- '+esc(e.status):''}</span></div>`).join('')||'<div class=\"msg\">Sin eventos Zigbee recientes</div>'}"
+"function renderDevicePage(){let s=lastStatus;if(!s||editingDeviceName())return;let id=new URLSearchParams(location.search).get('id');let box=document.getElementById('devicePage');if(!box)return;if(!id){box.innerHTML='<h2>Dispositivo</h2><div class=\"msg\">Selecciona un dispositivo desde la lista.</div>';return}let d=deviceById(id);if(!d){box.innerHTML='<h2>Dispositivo</h2><div class=\"msg\">No encontrado: '+esc(id)+'</div>';return}let rp=d.reporting||{},st=d.stats||{};let ev=(s.events||[]).filter(e=>String(e.device_id).toLowerCase()===String(d.ieee).toLowerCase()).slice(0,8).map(e=>`<div class=\"event\"><span>${ago(e.ts)}</span><span>${esc(e.type)}</span><span>${esc(e.status||'')}</span></div>`).join('')||'<div class=\"msg\">Sin eventos recientes para este dispositivo</div>';box.innerHTML=`<div class=\"deviceTitle\"><div><h2>${esc(d.name)}</h2><span class=\"pill\">${esc(d.ieee)}</span><span class=\"pill\">${d.online?'online':'offline'}</span><span class=\"pill\">${d.is_sleepy?'sleepy':'router'}</span></div><div class=\"actions\"><a class=\"small\" href=\"/devices\">Volver</a><button class=\"small secondary\" onclick=\"devAction('/api/device/reinterview','${d.ieee}')\">Re-entrevistar</button><button class=\"small secondary\" onclick=\"devAction('/api/device/configure','${d.ieee}')\">Reporting</button></div></div><div class=\"grid\">${metric('Estado',esc(d.state),d.online?'ok':'bad')}${metric('Visto hace',ago(d.last_seen_s||0))}${metric('Reporting',(rp.configured?'ok':'pendiente')+' '+(rp.received||0)+'/'+(rp.expected||0),rp.configured?'ok':'bad')}${metric('LQI/RSSI',(d.lqi!=null?d.lqi:'-')+' / '+(d.rssi!=null?d.rssi:'-'))}</div><div class=\"panel\">${panel([['Fabricante',esc(d.manufacturer||'-')],['Modelo',esc(d.model||'-')],['Alimentacion',esc(d.power_source||'-')],['Intentos entrevista',String(st.interview_attempts||0)],['Reports ok/igual',(st.report_attr_ok||0)+' / '+(st.report_attr_unchanged||0)],['Read ok/fail',(st.read_rsp_ok||0)+' / '+(st.read_rsp_fail||0)],['Reporting fallos',String(rp.failed||0)]])}</div><h2>Nombre</h2><div class=\"rename\"><input id=\"deviceName\" value=\"${esc(d.name)}\"><button onclick=\"renameDev('${d.ieee}',document.getElementById('deviceName').value)\">Guardar</button></div><h2>Endpoints</h2><table><thead><tr><th>EP</th><th>Perfil</th><th>Tipo</th><th>Clusters in</th><th>Clusters out</th></tr></thead><tbody>${endpointRows(d)||'<tr><td colspan=\"5\">Sin endpoints</td></tr>'}</tbody></table><h2>Atributos cacheados</h2><table><thead><tr><th>Nombre</th><th>Valor</th><th>EP</th><th>Cluster</th><th>Atributo</th><th>Edad</th></tr></thead><tbody>${attrRows(d)||'<tr><td colspan=\"6\">Sin atributos cacheados</td></tr>'}</tbody></table><h2>Eventos</h2><div class=\"events\">${ev}</div>`}"
+"function exportStatus(){if(!lastStatus)return;let blob=new Blob([JSON.stringify(lastStatus,null,2)],{type:'application/json'});let url=URL.createObjectURL(blob);let a=document.createElement('a');a.href=url;a.download='esp32-zigbee-status.json';a.click();setTimeout(()=>URL.revokeObjectURL(url),1000)}"
+"function pageName(){let p=location.pathname;return p==='/devices'?'devices':p==='/device'?'device':p==='/zigbee'?'zigbee':p==='/network'?'network':p==='/events'?'events':p==='/config'?'config':p==='/actions'?'actions':'status'}"
+"function showPage(){let p=pageName();document.querySelectorAll('.page').forEach(x=>x.classList.toggle('active',x.id==='page-'+p));document.querySelectorAll('nav a').forEach(x=>x.classList.toggle('active',x.dataset.page===(p==='device'?'devices':p)))}"
+"async function load(forceForm){const s=await j('/api/status');cfg=s.config;"
+"lastStatus=s;"
+"fillConfigForm(!!forceForm);"
 "document.getElementById('metrics').innerHTML=["
 "metric('mDNS',cfg.mdns_hostname+'.local'),"
 "metric('IP',s.network.has_ip?s.network.ip:'sin IP',s.network.has_ip?'ok':'bad'),"
@@ -716,13 +888,21 @@ static const char s_web_index_html[] =
 "metric('Join',s.permit_join.active?('abierto '+s.permit_join.remaining_s+'s'):'cerrado',s.permit_join.active?'ok':''),"
 "metric('Dispositivos',s.devices.length+'/'+s.device_capacity),"
 "metric('Online',s.online_devices),"
+"metric('Sleepy/router',(s.summary.sleepy_devices||0)+'/'+(s.summary.router_devices||0)),"
+"metric('Pendientes',(s.summary.reporting_pending||0)+' reporting / '+(s.summary.interview_active||0)+' entrevista'),"
 "metric('WebSocket',s.services.websocket_client?'conectado':'sin cliente',s.services.websocket_client?'ok':''),"
 "metric('TCP consola',s.services.tcp_console_client?'conectada':'sin cliente',s.services.tcp_console_client?'ok':''),"
-"metric('Heap libre',s.system.free_heap+' B')"
+"metric('Heap libre',bytes(s.system.free_heap)),"
+"metric('Heap min',bytes(s.system.min_free_heap)),"
+"metric('Reset',esc(s.system.reset_reason||'-'))"
 "].join('');"
-"document.getElementById('devices').innerHTML=s.devices.map((d,i)=>`<tr><td>${esc(d.name)}</td><td>${esc(d.ieee)}</td><td class=\"${d.online?'ok':'bad'}\">${d.online?'online':'offline'} / ${esc(d.state)}<br>reporting: ${d.reporting&&d.reporting.configured?'ok':'pendiente'}<br>ep: ${(d.endpoints||[]).length}</td><td>${readings(d)}</td><td>${esc(d.manufacturer||'-')} ${esc(d.model||'')}<br>${esc(d.power_source||'')}</td><td><div class=\"rename\"><input id=\"name_${i}\" value=\"${esc(d.name)}\"><button class=\"small\" onclick=\"renameDev('${d.ieee}',document.getElementById('name_${i}').value)\">Guardar</button></div><div class=\"actions\"><button class=\"small secondary\" onclick=\"devAction('/api/device/reinterview','${d.ieee}')\">Re-entrevistar</button><button class=\"small secondary\" onclick=\"devAction('/api/device/configure','${d.ieee}')\">Reporting</button></div></td></tr>`).join('')||'<tr><td colspan=\"6\">Sin dispositivos</td></tr>';}"
-"document.getElementById('save').onclick=async()=>{try{await j('/api/config',{method:'PUT',headers:{'Content-Type':'application/json'},body:JSON.stringify({mdns_hostname:mdns_hostname.value,mdns_instance:mdns_instance.value,ntp_server:ntp_server.value,timezone:timezone.value,permit_join_duration_s:+permit_join_duration_s.value,report_always_on_max_s:+report_always_on_max_s.value,report_sleepy_max_s:+report_sleepy_max_s.value,presence_grace_s:+presence_grace_s.value})});setMsg('Configuracion guardada');await load();}catch(e){setMsg('Error: '+e.message)}};"
-"document.getElementById('refresh').onclick=()=>load().catch(e=>setMsg('Error: '+e.message));"
+"renderConfigTime();renderDevices();renderEvents();renderSystem();renderNetwork();renderZigbee();renderDevicePage();}"
+"document.getElementById('save').onclick=async()=>{try{await j('/api/config',{method:'PUT',headers:{'Content-Type':'application/json'},body:JSON.stringify({mdns_hostname:mdns_hostname.value,mdns_instance:mdns_instance.value,ntp_server:ntp_server.value,timezone:timezone.value,permit_join_duration_s:+permit_join_duration_s.value,report_always_on_max_s:+report_always_on_max_s.value,report_sleepy_max_s:+report_sleepy_max_s.value,presence_grace_s:+presence_grace_s.value})});configDirty=false;setMsg('Configuracion guardada');await load(true);}catch(e){setMsg('Error: '+e.message)}};"
+"document.getElementById('refresh').onclick=()=>{configDirty=false;load(true).catch(e=>setMsg('Error: '+e.message))};"
+"document.getElementById('autoRefresh').onclick=()=>{autoRefresh=!autoRefresh;document.getElementById('autoRefresh').textContent=autoRefresh?'Pausar auto-refresh':'Reanudar auto-refresh'};"
+"document.getElementById('exportJson').onclick=exportStatus;"
+"document.getElementById('deviceSearch').oninput=renderDevices;"
+"document.getElementById('deviceFilter').onchange=renderDevices;"
 "document.getElementById('joinOpen').onclick=async()=>{await j('/api/permit-join',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({duration_s:+permit_join_duration_s.value||cfg.permit_join_duration_s})});await load();};"
 "document.getElementById('joinClose').onclick=async()=>{await j('/api/permit-join',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({duration_s:0})});await load();};"
 "document.getElementById('timeResync').onclick=()=>postAction('/api/time/resync','Sincronizacion iniciada');"
@@ -734,7 +914,7 @@ static const char s_web_index_html[] =
 "async function renameDev(id,name){try{await j('/api/device/rename',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({device_id:id,new_name:name})});setMsg('Nombre guardado');await load();}catch(e){setMsg('Error: '+e.message)}}"
 "async function devAction(url,id){try{await j(url,{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({device_id:id})});setMsg('Accion enviada');await load();}catch(e){setMsg('Error: '+e.message)}}"
 "async function postAction(url,msg){try{await j(url,{method:'POST',headers:{'Content-Type':'application/json'},body:'{}'});setMsg(msg);setTimeout(()=>load().catch(()=>{}),800)}catch(e){setMsg('Error: '+e.message)}}"
-"load().catch(e=>setMsg('Error: '+e.message));setInterval(()=>load().catch(()=>{}),5000);"
+"populateTimezones();setupConfigDirty();showPage();load(true).catch(e=>setMsg('Error: '+e.message));setInterval(()=>{if(autoRefresh)load(false).catch(()=>{})},5000);"
 "</script></body></html>";
 
 static esp_err_t web_send_json(httpd_req_t *req, cJSON *root)
@@ -748,6 +928,10 @@ static esp_err_t web_send_json(httpd_req_t *req, cJSON *root)
     char *text = cJSON_PrintUnformatted(root);
     cJSON_Delete(root);
     if (!text) {
+        ZB_LOG("WEB JSON serialize failed free_heap=%u min_free_heap=%u largest_internal=%u",
+               (unsigned)esp_get_free_heap_size(),
+               (unsigned)esp_get_minimum_free_heap_size(),
+               (unsigned)heap_caps_get_largest_free_block(MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT));
         httpd_resp_send_err(req, HTTPD_500_INTERNAL_SERVER_ERROR,
                             "Unable to serialize JSON");
         return ESP_FAIL;
@@ -775,6 +959,132 @@ static esp_err_t web_send_error_json(httpd_req_t *req,
                                status == HTTPD_500_INTERNAL_SERVER_ERROR ? "500 Internal Server Error" :
                                "400 Bad Request");
     return web_send_json(req, root);
+}
+
+typedef struct {
+    httpd_req_t *req;
+    char buf[WEB_JSON_CHUNK_SIZE];
+    size_t len;
+    esp_err_t err;
+} web_json_stream_t;
+
+static void web_json_stream_init(web_json_stream_t *s, httpd_req_t *req)
+{
+    memset(s, 0, sizeof(*s));
+    s->req = req;
+    s->err = ESP_OK;
+    httpd_resp_set_type(req, "application/json");
+}
+
+static esp_err_t web_json_stream_flush(web_json_stream_t *s)
+{
+    if (!s || s->err != ESP_OK) {
+        return s ? s->err : ESP_FAIL;
+    }
+    if (s->len == 0) {
+        return ESP_OK;
+    }
+
+    s->err = httpd_resp_send_chunk(s->req, s->buf, s->len);
+    s->len = 0;
+    return s->err;
+}
+
+static void web_json_stream_raw(web_json_stream_t *s, const char *text,
+                                size_t len)
+{
+    if (!s || s->err != ESP_OK || !text) {
+        return;
+    }
+
+    while (len > 0 && s->err == ESP_OK) {
+        size_t avail = sizeof(s->buf) - s->len;
+        if (avail == 0) {
+            web_json_stream_flush(s);
+            continue;
+        }
+        size_t take = len < avail ? len : avail;
+        memcpy(s->buf + s->len, text, take);
+        s->len += take;
+        text += take;
+        len -= take;
+    }
+}
+
+static void web_json_stream_text(web_json_stream_t *s, const char *text)
+{
+    web_json_stream_raw(s, text, text ? strlen(text) : 0);
+}
+
+static void web_json_stream_char(web_json_stream_t *s, char ch)
+{
+    web_json_stream_raw(s, &ch, 1);
+}
+
+static void web_json_stream_printf(web_json_stream_t *s, const char *fmt, ...)
+{
+    if (!s || s->err != ESP_OK || !fmt) {
+        return;
+    }
+
+    char tmp[384];
+    va_list ap;
+    va_start(ap, fmt);
+    int n = vsnprintf(tmp, sizeof(tmp), fmt, ap);
+    va_end(ap);
+
+    if (n < 0 || n >= (int)sizeof(tmp)) {
+        s->err = ESP_FAIL;
+        ZB_LOG("WEB JSON stream format overflow");
+        return;
+    }
+    web_json_stream_raw(s, tmp, (size_t)n);
+}
+
+static void web_json_stream_string(web_json_stream_t *s, const char *value)
+{
+    if (!value) {
+        value = "";
+    }
+
+    web_json_stream_char(s, '"');
+    while (*value && (!s || s->err == ESP_OK)) {
+        unsigned char ch = (unsigned char)*value++;
+        switch (ch) {
+            case '\\':
+                web_json_stream_text(s, "\\\\");
+                break;
+            case '"':
+                web_json_stream_text(s, "\\\"");
+                break;
+            case '\n':
+                web_json_stream_text(s, "\\n");
+                break;
+            case '\r':
+                web_json_stream_text(s, "\\r");
+                break;
+            case '\t':
+                web_json_stream_text(s, "\\t");
+                break;
+            default:
+                if (ch < 0x20) {
+                    web_json_stream_printf(s, "\\u%04X", ch);
+                } else {
+                    web_json_stream_char(s, (char)ch);
+                }
+                break;
+        }
+    }
+    web_json_stream_char(s, '"');
+}
+
+static esp_err_t web_json_stream_finish(web_json_stream_t *s)
+{
+    esp_err_t err = web_json_stream_flush(s);
+    if (err == ESP_OK) {
+        err = httpd_resp_send_chunk(s->req, NULL, 0);
+    }
+    return err;
 }
 
 static esp_err_t web_read_json_body(httpd_req_t *req, cJSON **out)
@@ -1045,6 +1355,14 @@ static esp_err_t web_send_action_result(httpd_req_t *req,
     return web_send_json(req, root);
 }
 
+static void web_record_device_action_from_id(const char *status,
+                                             const char *device_id)
+{
+    uint64_t ieee = 0;
+    utils_str_to_ieee(device_id, &ieee);
+    web_events_record_action(status, ieee, device_id);
+}
+
 static bool web_get_body_string(cJSON *body, const char *key,
                                 const char **out)
 {
@@ -1080,6 +1398,9 @@ static esp_err_t web_post_device_rename_handler(httpd_req_t *req)
 
     client_action_result_t result =
         client_actions_rename_device(device_id, new_name);
+    if (result == CLIENT_ACTION_OK) {
+        web_record_device_action_from_id("rename", device_id);
+    }
     cJSON_Delete(body);
     return web_send_action_result(req, result);
 }
@@ -1104,6 +1425,9 @@ static esp_err_t web_post_device_reinterview_handler(httpd_req_t *req)
 
     client_action_result_t result =
         client_actions_interview_device(device_id);
+    if (result == CLIENT_ACTION_OK) {
+        web_record_device_action_from_id("reinterview", device_id);
+    }
     cJSON_Delete(body);
     return web_send_action_result(req, result);
 }
@@ -1128,6 +1452,9 @@ static esp_err_t web_post_device_configure_handler(httpd_req_t *req)
 
     client_action_result_t result =
         client_actions_configure_device(device_id);
+    if (result == CLIENT_ACTION_OK) {
+        web_record_device_action_from_id("configure_reporting", device_id);
+    }
     cJSON_Delete(body);
     return web_send_action_result(req, result);
 }
@@ -1161,6 +1488,7 @@ static void schedule_delayed_cb(esp_timer_cb_t cb, const char *name)
 static esp_err_t web_post_reboot_handler(httpd_req_t *req)
 {
     (void)req;
+    web_events_record_action("reboot", 0, "system");
     cJSON *root = cJSON_CreateObject();
     cJSON_AddStringToObject(root, "status", "rebooting");
     esp_err_t err = web_send_json(req, root);
@@ -1170,6 +1498,7 @@ static esp_err_t web_post_reboot_handler(httpd_req_t *req)
 
 static esp_err_t web_post_erase_device_cache_handler(httpd_req_t *req)
 {
+    web_events_record_action("erase_device_cache", 0, "system");
     nvs_cache_erase();
     cJSON *root = cJSON_CreateObject();
     cJSON_AddStringToObject(root, "status", "ok");
@@ -1179,6 +1508,7 @@ static esp_err_t web_post_erase_device_cache_handler(httpd_req_t *req)
 
 static esp_err_t web_post_zigbee_factory_reset_handler(httpd_req_t *req)
 {
+    web_events_record_action("zigbee_factory_reset", 0, "system");
     nvs_cache_erase();
     cJSON *root = cJSON_CreateObject();
     cJSON_AddStringToObject(root, "status", "factory_reset_scheduled");
@@ -1200,6 +1530,9 @@ static esp_err_t web_post_close_ws_handler(httpd_req_t *req)
         clear_inventory_refresh();
         closed = true;
     }
+    if (closed) {
+        web_events_record_action("close_ws", 0, "websocket");
+    }
 
     cJSON *root = cJSON_CreateObject();
     cJSON_AddBoolToObject(root, "closed", closed);
@@ -1209,6 +1542,7 @@ static esp_err_t web_post_close_ws_handler(httpd_req_t *req)
 static esp_err_t web_post_time_resync_handler(httpd_req_t *req)
 {
     (void)req;
+    web_events_record_action("time_resync", 0, "time");
     time_sync_restart();
     cJSON *root = cJSON_CreateObject();
     cJSON_AddStringToObject(root, "status", "sync_started");
@@ -1242,6 +1576,7 @@ static esp_err_t web_post_configure_all_handler(httpd_req_t *req)
             busy++;
         }
     }
+    web_events_record_action("configure_all", 0, "reporting");
 
     cJSON *root = cJSON_CreateObject();
     cJSON_AddNumberToObject(root, "eligible", id_count);
@@ -1310,7 +1645,8 @@ static int32_t web_signed_value(uint32_t raw, int len)
     return (int32_t)raw;
 }
 
-static void add_reading_value(cJSON *reading, const attr_cache_entry_t *attr)
+static void web_json_stream_attr_value(web_json_stream_t *s,
+                                       const attr_cache_entry_t *attr)
 {
     int len = web_zcl_type_size(attr->attr_type);
     uint32_t raw = web_read_u32_le(attr->value, len);
@@ -1318,264 +1654,525 @@ static void add_reading_value(cJSON *reading, const attr_cache_entry_t *attr)
 
     switch (attr->cluster_id) {
         case 0x0006:
-            cJSON_AddStringToObject(reading, "value", raw ? "ON" : "OFF");
+            web_json_stream_string(s, raw ? "ON" : "OFF");
             break;
         case 0x0008:
-            cJSON_AddNumberToObject(reading, "value", raw & 0xFFu);
+            web_json_stream_printf(s, "%lu", (unsigned long)(raw & 0xFFu));
             break;
         case 0x0402:
-            cJSON_AddNumberToObject(reading, "value", (double)sval / 100.0);
+            web_json_stream_printf(s, "%.2f", (double)sval / 100.0);
             break;
         case 0x0405:
-            cJSON_AddNumberToObject(reading, "value", (double)(raw & 0xFFFFu) / 100.0);
+            web_json_stream_printf(s, "%.2f", (double)(raw & 0xFFFFu) / 100.0);
             break;
         case 0x0403:
-            cJSON_AddNumberToObject(reading, "value", (double)sval / 10.0);
+            web_json_stream_printf(s, "%.1f", (double)sval / 10.0);
             break;
         case 0x0400:
-            cJSON_AddNumberToObject(reading, "value", raw & 0xFFFFu);
+            web_json_stream_printf(s, "%lu", (unsigned long)(raw & 0xFFFFu));
             break;
         case 0x0406:
-            cJSON_AddBoolToObject(reading, "value", (raw & 0x01u) != 0);
+            web_json_stream_text(s, (raw & 0x01u) ? "true" : "false");
             break;
         case 0x0001:
             if (attr->attr_id == 0x0020) {
-                cJSON_AddNumberToObject(reading, "value", (raw & 0xFFu) * 100u);
+                web_json_stream_printf(s, "%lu", (unsigned long)((raw & 0xFFu) * 100u));
             } else {
-                cJSON_AddNumberToObject(reading, "value", (raw & 0xFFu) / 2u);
+                web_json_stream_printf(s, "%lu", (unsigned long)((raw & 0xFFu) / 2u));
             }
             break;
         case 0x0B04:
-            cJSON_AddNumberToObject(reading, "value", (double)sval / 10.0);
+            web_json_stream_printf(s, "%.1f", (double)sval / 10.0);
             break;
         case 0x0500:
-            cJSON_AddBoolToObject(reading, "value", (raw & 0x01u) == 0);
+            web_json_stream_text(s, (raw & 0x01u) == 0 ? "true" : "false");
             break;
         default:
-            cJSON_AddNumberToObject(reading, "value", raw);
+            web_json_stream_printf(s, "%lu", (unsigned long)raw);
             break;
     }
 }
 
-static void add_device_readings(cJSON *item, const device_record_t *dev)
+static void web_json_stream_device_readings(web_json_stream_t *s,
+                                            const attr_cache_entry_t *attrs,
+                                            size_t count)
 {
-    attr_cache_entry_t attrs[MAX_ATTR_CACHE];
-    size_t total = zcl_get_cached_attrs(dev->ieee_addr, attrs, MAX_ATTR_CACHE);
-    cJSON *readings = cJSON_AddObjectToObject(item, "readings");
-    if (!readings) {
-        return;
-    }
+    bool first = true;
 
-    size_t count = total > MAX_ATTR_CACHE ? MAX_ATTR_CACHE : total;
-    for (size_t i = 0; i < count; i++) {
-        ws_attr_meta_t meta;
-        if (!ws_model_attr_meta(attrs[i].cluster_id, attrs[i].attr_id, &meta)) {
-            continue;
-        }
+    web_json_stream_text(s, "\"readings\":{");
+    if (attrs) {
+        for (size_t i = 0; i < count; i++) {
+            ws_attr_meta_t meta;
+            if (!ws_model_attr_meta(attrs[i].cluster_id, attrs[i].attr_id, &meta)) {
+                continue;
+            }
 
-        cJSON *reading = cJSON_CreateObject();
-        if (!reading) {
-            continue;
+            if (!first) {
+                web_json_stream_char(s, ',');
+            }
+            first = false;
+            web_json_stream_string(s, meta.name);
+            web_json_stream_text(s, ":{\"value\":");
+            web_json_stream_attr_value(s, &attrs[i]);
+            if (meta.unit) {
+                web_json_stream_text(s, ",\"unit\":");
+                web_json_stream_string(s, meta.unit);
+            }
+            web_json_stream_printf(s,
+                                   ",\"endpoint\":%u,\"cluster_id\":%u,"
+                                   "\"attr_id\":%u,\"ts\":%lu}",
+                                   attrs[i].endpoint_id, attrs[i].cluster_id,
+                                   attrs[i].attr_id,
+                                   (unsigned long)(attrs[i].last_update_ms / 1000u));
         }
-        add_reading_value(reading, &attrs[i]);
-        if (meta.unit) {
-            cJSON_AddStringToObject(reading, "unit", meta.unit);
-        }
-        cJSON_AddNumberToObject(reading, "endpoint", attrs[i].endpoint_id);
-        cJSON_AddNumberToObject(reading, "cluster_id", attrs[i].cluster_id);
-        cJSON_AddNumberToObject(reading, "attr_id", attrs[i].attr_id);
-        cJSON_AddNumberToObject(reading, "ts", attrs[i].last_update_ms / 1000u);
-        cJSON_AddItemToObject(readings, meta.name, reading);
     }
+    web_json_stream_char(s, '}');
 }
 
-static void add_cluster_array(cJSON *parent, const char *name,
-                              const uint16_t *clusters, uint8_t count)
+static void web_json_stream_device_attrs(web_json_stream_t *s,
+                                         const attr_cache_entry_t *attrs,
+                                         size_t count)
 {
-    cJSON *array = cJSON_AddArrayToObject(parent, name);
-    if (!array) {
-        return;
+    web_json_stream_text(s, ",\"attrs\":[");
+    if (attrs) {
+        for (size_t i = 0; i < count; i++) {
+            char raw[17];
+            for (int b = 0; b < 8; b++) {
+                snprintf(&raw[b * 2], sizeof(raw) - (size_t)(b * 2),
+                         "%02X", attrs[i].value[b]);
+            }
+            raw[16] = '\0';
+
+            if (i > 0) {
+                web_json_stream_char(s, ',');
+            }
+            web_json_stream_printf(s,
+                                   "{\"endpoint\":%u,\"cluster_id\":%u,"
+                                   "\"attr_id\":%u,\"attr_type\":%u,\"raw\":",
+                                   attrs[i].endpoint_id, attrs[i].cluster_id,
+                                   attrs[i].attr_id, attrs[i].attr_type);
+            web_json_stream_string(s, raw);
+            web_json_stream_printf(s, ",\"ts\":%lu}",
+                                   (unsigned long)(attrs[i].last_update_ms / 1000u));
+        }
     }
+    web_json_stream_char(s, ']');
+}
+
+static void web_json_stream_cluster_array(web_json_stream_t *s,
+                                          const char *name,
+                                          const uint16_t *clusters,
+                                          uint8_t count)
+{
+    web_json_stream_string(s, name);
+    web_json_stream_text(s, ":[");
     for (uint8_t i = 0; i < count; i++) {
-        cJSON_AddItemToArray(array, cJSON_CreateNumber(clusters[i]));
+        if (i > 0) {
+            web_json_stream_char(s, ',');
+        }
+        web_json_stream_printf(s, "%u", clusters[i]);
     }
+    web_json_stream_char(s, ']');
 }
 
-static void add_device_endpoints(cJSON *item, const device_record_t *dev)
+static void web_json_stream_device_endpoints(web_json_stream_t *s,
+                                             const device_record_t *dev)
 {
-    cJSON *endpoints = cJSON_AddArrayToObject(item, "endpoints");
-    if (!endpoints) {
-        return;
-    }
+    web_json_stream_text(s, "\"endpoints\":[");
     for (uint8_t i = 0; i < dev->endpoint_count; i++) {
         const endpoint_record_t *ep = &dev->endpoints[i];
-        cJSON *ep_json = cJSON_CreateObject();
-        if (!ep_json) {
+        if (i > 0) {
+            web_json_stream_char(s, ',');
+        }
+        web_json_stream_printf(s,
+                               "{\"id\":%u,\"profile_id\":%u,\"device_id\":%u,"
+                               "\"device_type\":",
+                               ep->endpoint_id, ep->profile_id, ep->device_id);
+        web_json_stream_string(s, utils_device_type_name(ep->device_id));
+        web_json_stream_char(s, ',');
+        web_json_stream_cluster_array(s, "in_clusters",
+                                      ep->in_clusters, ep->in_cluster_count);
+        web_json_stream_char(s, ',');
+        web_json_stream_cluster_array(s, "out_clusters",
+                                      ep->out_clusters, ep->out_cluster_count);
+        web_json_stream_char(s, '}');
+    }
+    web_json_stream_char(s, ']');
+}
+
+static void web_json_stream_recent_events(web_json_stream_t *s)
+{
+    web_event_entry_t snapshot[WEB_EVENT_HISTORY_LEN];
+    uint32_t seq = 0;
+    bool first = true;
+
+    portENTER_CRITICAL(&s_web_event_lock);
+    memcpy(snapshot, s_web_events, sizeof(snapshot));
+    seq = s_web_event_seq;
+    portEXIT_CRITICAL(&s_web_event_lock);
+
+    web_json_stream_text(s, "\"events\":[");
+    uint32_t count = seq < WEB_EVENT_HISTORY_LEN ? seq : WEB_EVENT_HISTORY_LEN;
+    for (uint32_t n = 0; n < count; n++) {
+        uint32_t idx = (seq - 1u - n) % WEB_EVENT_HISTORY_LEN;
+        const web_event_entry_t *entry = &snapshot[idx];
+        if (!entry->in_use) {
             continue;
         }
-        cJSON_AddNumberToObject(ep_json, "id", ep->endpoint_id);
-        cJSON_AddNumberToObject(ep_json, "profile_id", ep->profile_id);
-        cJSON_AddNumberToObject(ep_json, "device_id", ep->device_id);
-        cJSON_AddStringToObject(ep_json, "device_type",
-                                utils_device_type_name(ep->device_id));
-        add_cluster_array(ep_json, "in_clusters",
-                          ep->in_clusters, ep->in_cluster_count);
-        add_cluster_array(ep_json, "out_clusters",
-                          ep->out_clusters, ep->out_cluster_count);
-        cJSON_AddItemToArray(endpoints, ep_json);
+
+        char ieee[20] = "";
+        if (entry->ieee != 0) {
+            utils_ieee_to_str(entry->ieee, ieee, sizeof(ieee));
+        }
+        if (!first) {
+            web_json_stream_char(s, ',');
+        }
+        first = false;
+        web_json_stream_printf(s, "{\"ts\":%lu,\"type\":",
+                               (unsigned long)entry->ts_s);
+        web_json_stream_string(s, web_event_type_name(entry->type));
+        web_json_stream_text(s, ",\"device_id\":");
+        web_json_stream_string(s, ieee);
+        web_json_stream_text(s, ",\"name\":");
+        web_json_stream_string(s, entry->friendly_name);
+        if (entry->status[0]) {
+            web_json_stream_text(s, ",\"status\":");
+            web_json_stream_string(s, entry->status);
+        }
+        if (entry->type == ZB_EVT_AVAILABILITY ||
+            entry->type == ZB_EVT_DEVICE_JOINED ||
+            entry->type == ZB_EVT_DEVICE_LEAVE) {
+            web_json_stream_printf(s, ",\"online\":%s",
+                                   entry->online ? "true" : "false");
+        }
+        if (entry->type == ZB_EVT_ATTR_CHANGED) {
+            web_json_stream_printf(s,
+                                   ",\"endpoint\":%u,\"cluster_id\":%u,"
+                                   "\"attr_id\":%u",
+                                   entry->endpoint, entry->cluster_id,
+                                   entry->attr_id);
+        }
+        if (entry->type == ZB_EVT_PERMIT_JOIN) {
+            web_json_stream_printf(s, ",\"duration\":%u",
+                                   entry->permit_join_duration);
+        }
+        web_json_stream_char(s, '}');
     }
+    web_json_stream_char(s, ']');
+}
+
+static int32_t web_local_utc_offset_seconds(time_t now)
+{
+    struct tm local_tm = {0};
+    struct tm utc_tm = {0};
+
+    localtime_r(&now, &local_tm);
+    gmtime_r(&now, &utc_tm);
+
+    time_t local_epoch = mktime(&local_tm);
+    time_t utc_epoch = mktime(&utc_tm);
+    return (int32_t)difftime(local_epoch, utc_epoch);
+}
+
+static void web_format_utc_offset(int32_t offset_s, char *buf, size_t len)
+{
+    if (!buf || len == 0) {
+        return;
+    }
+
+    char sign = offset_s >= 0 ? '+' : '-';
+    uint32_t abs_s = offset_s >= 0 ? (uint32_t)offset_s
+                                   : (uint32_t)(-offset_s);
+    uint32_t hours = abs_s / 3600u;
+    uint32_t minutes = (abs_s % 3600u) / 60u;
+    snprintf(buf, len, "UTC%c%02lu:%02lu", sign,
+             (unsigned long)hours, (unsigned long)minutes);
 }
 
 static esp_err_t web_get_status_handler(httpd_req_t *req)
 {
-    cJSON *root = cJSON_CreateObject();
-    if (!root) {
-        return web_send_error_json(req, HTTPD_500_INTERNAL_SERVER_ERROR,
-                                   "oom", "Unable to allocate JSON");
-    }
+    web_json_stream_t out;
+    app_config_t cfg;
+    const esp_app_desc_t *app = esp_app_get_description();
+    const esp_partition_t *partition = esp_ota_get_running_partition();
+    esp_reset_reason_t reset_reason = esp_reset_reason();
 
-    json_add_config(root);
+    app_config_get(&cfg);
+    web_json_stream_init(&out, req);
 
-    cJSON *system = cJSON_AddObjectToObject(root, "system");
-    if (system) {
-        cJSON_AddNumberToObject(system, "uptime_s", utils_uptime_ms() / 1000u);
-        cJSON_AddNumberToObject(system, "free_heap",
-                                (double)esp_get_free_heap_size());
-        cJSON_AddNumberToObject(system, "free_internal_heap",
-                                (double)heap_caps_get_free_size(MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT));
+    web_json_stream_text(&out, "{\"config\":{\"mdns_hostname\":");
+    web_json_stream_string(&out, cfg.mdns_hostname);
+    web_json_stream_text(&out, ",\"mdns_instance\":");
+    web_json_stream_string(&out, cfg.mdns_instance);
+    web_json_stream_text(&out, ",\"ntp_server\":");
+    web_json_stream_string(&out, cfg.ntp_server);
+    web_json_stream_text(&out, ",\"timezone\":");
+    web_json_stream_string(&out, cfg.timezone);
+    web_json_stream_printf(&out,
+                           ",\"permit_join_duration_s\":%u,"
+                           "\"report_always_on_max_s\":%lu,"
+                           "\"report_sleepy_max_s\":%lu,"
+                           "\"presence_grace_s\":%lu}",
+                           cfg.permit_join_duration_s,
+                           (unsigned long)cfg.report_always_on_max_s,
+                           (unsigned long)cfg.report_sleepy_max_s,
+                           (unsigned long)cfg.presence_grace_s);
+
+    web_json_stream_printf(&out,
+                           ",\"system\":{\"uptime_s\":%lu,\"free_heap\":%u,"
+                           "\"min_free_heap\":%u,\"free_internal_heap\":%u,"
+                           "\"reset_reason\":",
+                           (unsigned long)(utils_uptime_ms() / 1000u),
+                           (unsigned)esp_get_free_heap_size(),
+                           (unsigned)esp_get_minimum_free_heap_size(),
+                           (unsigned)heap_caps_get_free_size(MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT));
+    web_json_stream_string(&out, reset_reason_name(reset_reason));
+    if (app) {
+        web_json_stream_text(&out, ",\"app_name\":");
+        web_json_stream_string(&out, app->project_name);
+        web_json_stream_text(&out, ",\"app_version\":");
+        web_json_stream_string(&out, app->version);
+        web_json_stream_text(&out, ",\"idf_version\":");
+        web_json_stream_string(&out, app->idf_ver);
+        web_json_stream_text(&out, ",\"build_date\":");
+        web_json_stream_string(&out, app->date);
+        web_json_stream_text(&out, ",\"build_time\":");
+        web_json_stream_string(&out, app->time);
     }
+    if (partition) {
+        web_json_stream_text(&out, ",\"partition_label\":");
+        web_json_stream_string(&out, partition->label);
+        web_json_stream_printf(&out,
+                               ",\"partition_address\":%lu,"
+                               "\"partition_size\":%lu",
+                               (unsigned long)partition->address,
+                               (unsigned long)partition->size);
+    }
+    web_json_stream_char(&out, '}');
 
     eth_driver_status_t eth_status;
     eth_driver_get_status(&eth_status);
-    cJSON *network = cJSON_AddObjectToObject(root, "network");
-    if (network) {
-        cJSON_AddBoolToObject(network, "started", eth_status.started);
-        cJSON_AddBoolToObject(network, "link_up", eth_status.link_up);
-        cJSON_AddBoolToObject(network, "has_ip", eth_status.has_ip);
-        cJSON_AddStringToObject(network, "mac", eth_status.mac);
-        cJSON_AddStringToObject(network, "ip", eth_status.ip);
-        cJSON_AddStringToObject(network, "netmask", eth_status.netmask);
-        cJSON_AddStringToObject(network, "gateway", eth_status.gateway);
-    }
+    web_json_stream_printf(&out,
+                           ",\"network\":{\"started\":%s,\"link_up\":%s,"
+                           "\"has_ip\":%s,\"mac\":",
+                           eth_status.started ? "true" : "false",
+                           eth_status.link_up ? "true" : "false",
+                           eth_status.has_ip ? "true" : "false");
+    web_json_stream_string(&out, eth_status.mac);
+    web_json_stream_text(&out, ",\"ip\":");
+    web_json_stream_string(&out, eth_status.ip);
+    web_json_stream_text(&out, ",\"netmask\":");
+    web_json_stream_string(&out, eth_status.netmask);
+    web_json_stream_text(&out, ",\"gateway\":");
+    web_json_stream_string(&out, eth_status.gateway);
+    web_json_stream_char(&out, '}');
 
-    cJSON *services = cJSON_AddObjectToObject(root, "services");
-    if (services) {
-        cJSON_AddBoolToObject(services, "websocket_client",
-                              ws_client_session_is_active());
-        cJSON_AddBoolToObject(services, "tcp_console_client",
-                              tcp_console_is_connected());
-    }
+    web_json_stream_printf(&out,
+                           ",\"services\":{\"websocket_client\":%s,"
+                           "\"tcp_console_client\":%s}",
+                           ws_client_session_is_active() ? "true" : "false",
+                           tcp_console_is_connected() ? "true" : "false");
 
     time_sync_status_t time_status;
     time_sync_get_status(&time_status);
-    cJSON *time_json = cJSON_AddObjectToObject(root, "time");
-    if (time_json) {
-        cJSON_AddBoolToObject(time_json, "started", time_status.started);
-        cJSON_AddBoolToObject(time_json, "synced", time_status.synced);
-        cJSON_AddStringToObject(time_json, "server", time_status.server);
-        cJSON_AddStringToObject(time_json, "timezone", time_status.timezone);
-        cJSON_AddNumberToObject(time_json, "last_sync_uptime_s",
-                                time_status.last_sync_uptime_s);
-    }
+    bool valid_time = utils_wall_time_valid();
+    web_json_stream_printf(&out,
+                           ",\"time\":{\"started\":%s,\"synced\":%s,\"server\":",
+                           time_status.started ? "true" : "false",
+                           time_status.synced ? "true" : "false");
+    web_json_stream_string(&out, time_status.server);
+    web_json_stream_text(&out, ",\"timezone\":");
+    web_json_stream_string(&out, time_status.timezone);
+    web_json_stream_printf(&out,
+                           ",\"last_sync_uptime_s\":%lu,\"valid\":%s",
+                           (unsigned long)time_status.last_sync_uptime_s,
+                           valid_time ? "true" : "false");
+    if (valid_time) {
+        time_t now = time(NULL);
+        struct tm local_tm = {0};
+        struct tm utc_tm = {0};
+        char local_buf[32];
+        char utc_buf[32];
+        char offset_buf[12];
 
-    cJSON *join = cJSON_AddObjectToObject(root, "permit_join");
-    if (join) {
-        cJSON_AddBoolToObject(join, "active", button_handler_permit_join_active());
-        cJSON_AddNumberToObject(join, "remaining_s",
-                                button_handler_permit_join_remaining_s());
+        localtime_r(&now, &local_tm);
+        gmtime_r(&now, &utc_tm);
+        strftime(local_buf, sizeof(local_buf), "%Y-%m-%d %H:%M:%S",
+                 &local_tm);
+        strftime(utc_buf, sizeof(utc_buf), "%Y-%m-%d %H:%M:%S",
+                 &utc_tm);
+        web_format_utc_offset(web_local_utc_offset_seconds(now),
+                              offset_buf, sizeof(offset_buf));
+        web_json_stream_printf(&out, ",\"current_epoch\":%lu",
+                               (unsigned long)now);
+        web_json_stream_text(&out, ",\"current_local\":");
+        web_json_stream_string(&out, local_buf);
+        web_json_stream_text(&out, ",\"current_utc\":");
+        web_json_stream_string(&out, utc_buf);
+        web_json_stream_text(&out, ",\"utc_offset\":");
+        web_json_stream_string(&out, offset_buf);
     }
+    web_json_stream_char(&out, '}');
 
-    cJSON *zigbee = cJSON_AddObjectToObject(root, "zigbee");
+    web_json_stream_printf(&out,
+                           ",\"permit_join\":{\"active\":%s,\"remaining_s\":%lu}",
+                           button_handler_permit_join_active() ? "true" : "false",
+                           (unsigned long)button_handler_permit_join_remaining_s());
+
     bool zb_ready = zigbee_core_is_ready();
-    if (zigbee) {
-        cJSON_AddBoolToObject(zigbee, "ready", zb_ready);
-        if (zb_ready && esp_zb_lock_acquire(pdMS_TO_TICKS(WEB_ZB_LOCK_WAIT_MS))) {
-            esp_zb_ieee_addr_t ext_pan = {0};
-            esp_zb_ieee_addr_t coord_ieee = {0};
-            char ext_pan_str[17];
-            char coord_ieee_str[17];
-            cJSON_AddNumberToObject(zigbee, "channel", esp_zb_get_current_channel());
-            cJSON_AddNumberToObject(zigbee, "pan_id", esp_zb_get_pan_id());
-            esp_zb_get_extended_pan_id(ext_pan);
-            esp_zb_get_long_address(coord_ieee);
-            format_zb_addr(ext_pan, ext_pan_str, sizeof(ext_pan_str));
-            format_zb_addr(coord_ieee, coord_ieee_str, sizeof(coord_ieee_str));
-            cJSON_AddStringToObject(zigbee, "ext_pan_id", ext_pan_str);
-            cJSON_AddStringToObject(zigbee, "coordinator_ieee", coord_ieee_str);
-            esp_zb_lock_release();
-        }
+    web_json_stream_printf(&out, ",\"zigbee\":{\"ready\":%s",
+                           zb_ready ? "true" : "false");
+    if (zb_ready && esp_zb_lock_acquire(pdMS_TO_TICKS(WEB_ZB_LOCK_WAIT_MS))) {
+        esp_zb_ieee_addr_t ext_pan = {0};
+        esp_zb_ieee_addr_t coord_ieee = {0};
+        char ext_pan_str[17];
+        char coord_ieee_str[17];
+        web_json_stream_printf(&out, ",\"channel\":%u,\"pan_id\":%u",
+                               esp_zb_get_current_channel(), esp_zb_get_pan_id());
+        esp_zb_get_extended_pan_id(ext_pan);
+        esp_zb_get_long_address(coord_ieee);
+        format_zb_addr(ext_pan, ext_pan_str, sizeof(ext_pan_str));
+        format_zb_addr(coord_ieee, coord_ieee_str, sizeof(coord_ieee_str));
+        web_json_stream_text(&out, ",\"ext_pan_id\":");
+        web_json_stream_string(&out, ext_pan_str);
+        web_json_stream_text(&out, ",\"coordinator_ieee\":");
+        web_json_stream_string(&out, coord_ieee_str);
+        esp_zb_lock_release();
+    }
+    web_json_stream_char(&out, '}');
+
+    web_json_stream_printf(&out, ",\"device_capacity\":%u,\"device_count\":%u",
+                           (unsigned)MAX_DEVICES, (unsigned)dm_count());
+    web_json_stream_text(&out, ",\"devices\":[");
+    uint8_t online_count = 0;
+    uint8_t sleepy_count = 0;
+    uint8_t router_count = 0;
+    uint8_t reporting_pending_count = 0;
+    uint8_t interview_active_count = 0;
+    bool first_device = true;
+    device_record_t *dev_snapshot = malloc(sizeof(*dev_snapshot));
+    attr_cache_entry_t *attr_snapshot =
+        malloc(sizeof(*attr_snapshot) * MAX_ATTR_CACHE);
+    if (!dev_snapshot) {
+        ZB_LOG("WEB status: no heap for device snapshot free_heap=%u largest_internal=%u",
+               (unsigned)esp_get_free_heap_size(),
+               (unsigned)heap_caps_get_largest_free_block(MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT));
+    }
+    if (!attr_snapshot) {
+        ZB_LOG("WEB status: no heap for attr snapshot free_heap=%u largest_internal=%u",
+               (unsigned)esp_get_free_heap_size(),
+               (unsigned)heap_caps_get_largest_free_block(MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT));
     }
 
-    cJSON_AddNumberToObject(root, "device_capacity", MAX_DEVICES);
-    cJSON_AddNumberToObject(root, "device_count", dm_count());
-
-    cJSON *devices = cJSON_AddArrayToObject(root, "devices");
-    uint8_t online_count = 0;
-    dm_lock();
     for (int i = 0; i < MAX_DEVICES; i++) {
-        device_record_t *dev = dm_get_by_index(i);
-        if (!dev) {
+        bool has_device = false;
+        if (dev_snapshot) {
+            dm_lock();
+            device_record_t *dev = dm_get_by_index(i);
+            if (dev) {
+                *dev_snapshot = *dev;
+                has_device = true;
+            }
+            dm_unlock();
+        }
+        if (!has_device) {
             continue;
         }
-        if (dev->online) {
+        if (dev_snapshot->online) {
             online_count++;
         }
-        if (!devices) {
-            continue;
+        if (dev_snapshot->is_sleepy) {
+            sleepy_count++;
+        } else {
+            router_count++;
+        }
+        if (!dev_snapshot->reporting_configured || dev_snapshot->report_cfg_in_progress) {
+            reporting_pending_count++;
+        }
+        if (dev_snapshot->state == DEV_STATE_INTERVIEWING) {
+            interview_active_count++;
         }
 
         char ieee[20];
-        utils_ieee_to_str(dev->ieee_addr, ieee, sizeof(ieee));
-        cJSON *item = cJSON_CreateObject();
-        if (!item) {
-            continue;
+        utils_ieee_to_str(dev_snapshot->ieee_addr, ieee, sizeof(ieee));
+        if (!first_device) {
+            web_json_stream_char(&out, ',');
         }
-        cJSON_AddStringToObject(item, "ieee", ieee);
-        cJSON_AddStringToObject(item, "name", dm_display_name(dev));
-        cJSON_AddBoolToObject(item, "online", dev->online);
-        cJSON_AddBoolToObject(item, "is_sleepy", dev->is_sleepy);
-        cJSON_AddStringToObject(item, "state",
-                                utils_device_state_name((int)dev->state));
-        cJSON_AddStringToObject(item, "manufacturer", dev->manufacturer);
-        cJSON_AddStringToObject(item, "model", dev->model);
-        cJSON_AddStringToObject(item, "power_source",
-                                utils_power_source_name(dev->power_source));
-        cJSON_AddNumberToObject(item, "last_seen_s", dev->last_seen_ms / 1000u);
-        cJSON *reporting = cJSON_AddObjectToObject(item, "reporting");
-        if (reporting) {
-            cJSON_AddBoolToObject(reporting, "configured",
-                                  dev->reporting_configured);
-            cJSON_AddBoolToObject(reporting, "in_progress",
-                                  dev->report_cfg_in_progress);
-            cJSON_AddNumberToObject(reporting, "expected",
-                                    dev->report_cfg_expected);
-            cJSON_AddNumberToObject(reporting, "received",
-                                    dev->report_cfg_received);
-            cJSON_AddNumberToObject(reporting, "failed",
-                                    dev->report_cfg_failed);
-        }
-        cJSON *stats = cJSON_AddObjectToObject(item, "stats");
-        if (stats) {
-            cJSON_AddNumberToObject(stats, "report_attr_ok", dev->report_attr_ok);
-            cJSON_AddNumberToObject(stats, "report_attr_unchanged",
-                                    dev->report_attr_unchanged);
-            cJSON_AddNumberToObject(stats, "read_rsp_ok", dev->read_rsp_ok);
-            cJSON_AddNumberToObject(stats, "read_rsp_fail", dev->read_rsp_fail);
-            cJSON_AddNumberToObject(stats, "interview_attempts",
-                                    dev->interview_attempts);
-        }
-        if (dev->radio_metrics_valid) {
-            cJSON_AddNumberToObject(item, "lqi", dev->last_lqi);
-            cJSON_AddNumberToObject(item, "rssi", dev->last_rssi);
-        }
-        add_device_endpoints(item, dev);
-        add_device_readings(item, dev);
-        cJSON_AddItemToArray(devices, item);
-    }
-    dm_unlock();
-    cJSON_AddNumberToObject(root, "online_devices", online_count);
+        first_device = false;
 
-    return web_send_json(req, root);
+        web_json_stream_text(&out, "{\"ieee\":");
+        web_json_stream_string(&out, ieee);
+        web_json_stream_text(&out, ",\"name\":");
+        web_json_stream_string(&out, dm_display_name(dev_snapshot));
+        web_json_stream_printf(&out,
+                               ",\"online\":%s,\"is_sleepy\":%s,\"state\":",
+                               dev_snapshot->online ? "true" : "false",
+                               dev_snapshot->is_sleepy ? "true" : "false");
+        web_json_stream_string(&out,
+                               utils_device_state_name((int)dev_snapshot->state));
+        web_json_stream_text(&out, ",\"manufacturer\":");
+        web_json_stream_string(&out, dev_snapshot->manufacturer);
+        web_json_stream_text(&out, ",\"model\":");
+        web_json_stream_string(&out, dev_snapshot->model);
+        web_json_stream_text(&out, ",\"power_source\":");
+        web_json_stream_string(&out,
+                               utils_power_source_name(dev_snapshot->power_source));
+        web_json_stream_printf(&out,
+                               ",\"last_seen_s\":%lu,\"reporting\":{"
+                               "\"configured\":%s,\"in_progress\":%s,"
+                               "\"expected\":%u,\"received\":%u,\"failed\":%u},"
+                               "\"stats\":{\"report_attr_ok\":%lu,"
+                               "\"report_attr_unchanged\":%lu,"
+                               "\"read_rsp_ok\":%lu,\"read_rsp_fail\":%lu,"
+                               "\"interview_attempts\":%lu}",
+                               (unsigned long)(dev_snapshot->last_seen_ms / 1000u),
+                               dev_snapshot->reporting_configured ? "true" : "false",
+                               dev_snapshot->report_cfg_in_progress ? "true" : "false",
+                               dev_snapshot->report_cfg_expected,
+                               dev_snapshot->report_cfg_received,
+                               dev_snapshot->report_cfg_failed,
+                               (unsigned long)dev_snapshot->report_attr_ok,
+                               (unsigned long)dev_snapshot->report_attr_unchanged,
+                               (unsigned long)dev_snapshot->read_rsp_ok,
+                               (unsigned long)dev_snapshot->read_rsp_fail,
+                               (unsigned long)dev_snapshot->interview_attempts);
+        if (dev_snapshot->radio_metrics_valid) {
+            web_json_stream_printf(&out, ",\"lqi\":%u,\"rssi\":%d",
+                                   dev_snapshot->last_lqi,
+                                   (int)dev_snapshot->last_rssi);
+        }
+        web_json_stream_char(&out, ',');
+        web_json_stream_device_endpoints(&out, dev_snapshot);
+        web_json_stream_char(&out, ',');
+        size_t attr_count = 0;
+        if (attr_snapshot) {
+            size_t total = zcl_get_cached_attrs(dev_snapshot->ieee_addr, attr_snapshot,
+                                                MAX_ATTR_CACHE);
+            attr_count = total > MAX_ATTR_CACHE ? MAX_ATTR_CACHE : total;
+        }
+        web_json_stream_device_readings(&out, attr_snapshot, attr_count);
+        web_json_stream_device_attrs(&out, attr_snapshot, attr_count);
+        web_json_stream_char(&out, '}');
+    }
+    free(dev_snapshot);
+    free(attr_snapshot);
+
+    web_json_stream_printf(&out,
+                           "],\"online_devices\":%u,\"summary\":{"
+                           "\"sleepy_devices\":%u,\"router_devices\":%u,"
+                           "\"reporting_pending\":%u,\"interview_active\":%u},",
+                           online_count, sleepy_count, router_count,
+                           reporting_pending_count, interview_active_count);
+    web_json_stream_recent_events(&out);
+    web_json_stream_text(&out, "}");
+
+    esp_err_t err = web_json_stream_finish(&out);
+    if (err != ESP_OK) {
+        ZB_LOG("WEB status stream failed err=0x%X free_heap=%u largest_internal=%u",
+               err, (unsigned)esp_get_free_heap_size(),
+               (unsigned)heap_caps_get_largest_free_block(MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT));
+    }
+    return err;
 }
 
 static esp_err_t start_server(void)
@@ -1588,7 +2185,7 @@ static esp_err_t start_server(void)
     config.send_wait_timeout = WS_SEND_WAIT_TIMEOUT_S;
     config.recv_wait_timeout = WS_RECV_WAIT_TIMEOUT_S;
     config.stack_size = WS_HTTPD_STACK_SIZE;
-    config.max_uri_handlers = 24;
+    config.max_uri_handlers = 28;
 
     esp_err_t err = httpd_start(&s_server, &config);
     if (err != ESP_OK) {
@@ -1615,6 +2212,83 @@ static esp_err_t start_server(void)
         .user_ctx = NULL,
     };
     err = httpd_register_uri_handler(s_server, &index_uri);
+    if (err != ESP_OK) {
+        return err;
+    }
+
+    httpd_uri_t devices_page_uri = {
+        .uri = "/devices",
+        .method = HTTP_GET,
+        .handler = web_index_handler,
+        .user_ctx = NULL,
+    };
+    err = httpd_register_uri_handler(s_server, &devices_page_uri);
+    if (err != ESP_OK) {
+        return err;
+    }
+
+    httpd_uri_t events_page_uri = {
+        .uri = "/events",
+        .method = HTTP_GET,
+        .handler = web_index_handler,
+        .user_ctx = NULL,
+    };
+    err = httpd_register_uri_handler(s_server, &events_page_uri);
+    if (err != ESP_OK) {
+        return err;
+    }
+
+    httpd_uri_t config_page_uri = {
+        .uri = "/config",
+        .method = HTTP_GET,
+        .handler = web_index_handler,
+        .user_ctx = NULL,
+    };
+    err = httpd_register_uri_handler(s_server, &config_page_uri);
+    if (err != ESP_OK) {
+        return err;
+    }
+
+    httpd_uri_t actions_page_uri = {
+        .uri = "/actions",
+        .method = HTTP_GET,
+        .handler = web_index_handler,
+        .user_ctx = NULL,
+    };
+    err = httpd_register_uri_handler(s_server, &actions_page_uri);
+    if (err != ESP_OK) {
+        return err;
+    }
+
+    httpd_uri_t device_page_uri = {
+        .uri = "/device",
+        .method = HTTP_GET,
+        .handler = web_index_handler,
+        .user_ctx = NULL,
+    };
+    err = httpd_register_uri_handler(s_server, &device_page_uri);
+    if (err != ESP_OK) {
+        return err;
+    }
+
+    httpd_uri_t zigbee_page_uri = {
+        .uri = "/zigbee",
+        .method = HTTP_GET,
+        .handler = web_index_handler,
+        .user_ctx = NULL,
+    };
+    err = httpd_register_uri_handler(s_server, &zigbee_page_uri);
+    if (err != ESP_OK) {
+        return err;
+    }
+
+    httpd_uri_t network_page_uri = {
+        .uri = "/network",
+        .method = HTTP_GET,
+        .handler = web_index_handler,
+        .user_ctx = NULL,
+    };
+    err = httpd_register_uri_handler(s_server, &network_page_uri);
     if (err != ESP_OK) {
         return err;
     }
@@ -1807,6 +2481,7 @@ void ws_transport_init(EventGroupHandle_t eth_ready_eg)
     s_tx_lock = xSemaphoreCreateMutex();
     configASSERT(s_tx_lock);
     ws_client_session_init();
+    zb_events_register(web_events_record_zigbee);
 
     xTaskCreate(ws_task, "ws_task", WS_TASK_STACK, NULL,
                 WS_TASK_PRIORITY, &s_task_handle);

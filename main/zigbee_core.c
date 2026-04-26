@@ -46,16 +46,9 @@
 #define TIME_STATUS_MASTER_BIT          (1u << 0)
 #define TIME_STATUS_SYNCHRONIZED_BIT    (1u << 1)
 #define TIME_STATUS_MASTER_ZONE_DST_BIT (1u << 2)
-#define POLL_CONTROL_STATUS_DATA_ATTR_ID 0xEFFFu
-#define POLL_CONTROL_CLIENT_FAST_POLL_TIMEOUT_DEFAULT_QS 0x00F0u
 
 static volatile bool s_network_ready = false;
 static bool s_time_attr_refresh_started = false;
-
-typedef struct __attribute__((packed)) {
-    uint8_t is_poll_mode;
-    uint16_t fast_poll_timeout;
-} poll_control_client_status_t;
 
 static esp_zb_time_cluster_cfg_t s_time_cluster_cfg = {
     .time = ESP_ZB_ZCL_TIME_TIME_DEFAULT_VALUE,
@@ -77,10 +70,6 @@ static esp_zb_poll_control_cluster_cfg_t s_poll_control_cluster_cfg = {
     .check_in_interval_min = ESP_ZB_ZCL_POLL_CONTROL_MIN_CHECK_IN_INTERVAL_DEFAULT_VALUE,
     .long_poll_interval_min = ESP_ZB_ZCL_POLL_CONTROL_LONG_POLL_MIN_INTERVAL_DEFAULT_VALUE,
     .fast_poll_timeout_max = ESP_ZB_ZCL_POLL_CONTROL_FAST_POLL_MAX_TIMEOUT_DEFAULT_VALUE,
-};
-static poll_control_client_status_t s_poll_control_client_status = {
-    .is_poll_mode = 0,
-    .fast_poll_timeout = POLL_CONTROL_CLIENT_FAST_POLL_TIMEOUT_DEFAULT_QS,
 };
 
 typedef struct {
@@ -684,6 +673,15 @@ void esp_zb_app_signal_handler(esp_zb_app_signal_t *signal_struct)
             ZB_LOG("SIGNAL PANID_CONFLICT detected");
             break;
 
+        case ESP_ZB_ZDO_SIGNAL_PRODUCTION_CONFIG_READY:
+            if (err == ESP_OK) {
+                ZB_LOG("SIGNAL PRODUCTION_CONFIG_READY OK");
+            } else {
+                ZB_LOG("SIGNAL PRODUCTION_CONFIG_READY unavailable err=0x%X",
+                       err);
+            }
+            break;
+
         default:
             ZB_LOG("SIGNAL 0x%04X err=0x%X (unhandled)", (unsigned)sig_type, err);
             break;
@@ -842,9 +840,6 @@ static void esp_zb_task(void *arg)
                                  &s_valid_until_time);
     esp_zb_cluster_list_add_time_cluster(cluster_list, time_cluster,
                                          ESP_ZB_ZCL_CLUSTER_SERVER_ROLE);
-    esp_zb_poll_control_cluster_add_attr(poll_control_cluster,
-                                         POLL_CONTROL_STATUS_DATA_ATTR_ID,
-                                         &s_poll_control_client_status);
     esp_zb_cluster_list_add_poll_control_cluster(
         cluster_list, poll_control_cluster, ESP_ZB_ZCL_CLUSTER_CLIENT_ROLE);
 

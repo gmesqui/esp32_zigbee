@@ -60,19 +60,19 @@ void utils_format_log_prefix(char *buf, size_t len)
     }
 
     struct timeval tv = {0};
-    struct tm utc_tm = {0};
+    struct tm local_tm = {0};
 
     gettimeofday(&tv, NULL);
-    gmtime_r(&tv.tv_sec, &utc_tm);
+    localtime_r(&tv.tv_sec, &local_tm);
 
     snprintf(buf, len,
-             "%04d-%02d-%02d %02d:%02d:%02d.%03ldZ",
-             utc_tm.tm_year + 1900,
-             utc_tm.tm_mon + 1,
-             utc_tm.tm_mday,
-             utc_tm.tm_hour,
-             utc_tm.tm_min,
-             utc_tm.tm_sec,
+             "%04d-%02d-%02d %02d:%02d:%02d.%03ld",
+             local_tm.tm_year + 1900,
+             local_tm.tm_mon + 1,
+             local_tm.tm_mday,
+             local_tm.tm_hour,
+             local_tm.tm_min,
+             local_tm.tm_sec,
              tv.tv_usec / 1000L);
 }
 
