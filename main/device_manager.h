@@ -9,6 +9,7 @@
 #define MAX_ENDPOINTS         8
 #define MAX_CLUSTERS_PER_EP  32
 #define MAX_BINDINGS_PER_EP   8
+#define MAX_REPORT_CFG_TRACKED 24
 #define FRIENDLY_NAME_LEN    33   // 32 printable chars + NUL
 
 // ---------------------------------------------------------------------------
@@ -21,6 +22,23 @@ typedef struct {
     uint64_t dst_ieee_addr;
     uint8_t  dst_endpoint;
 } binding_record_t;
+
+typedef enum {
+    REPORT_CFG_RESULT_PENDING = 0,
+    REPORT_CFG_RESULT_OK      = 1,
+    REPORT_CFG_RESULT_FAIL    = 2,
+    REPORT_CFG_RESULT_MISSING = 3,
+    REPORT_CFG_RESULT_BIND_FAIL = 4,
+    REPORT_CFG_RESULT_WRITE_FAIL = 5,
+} report_cfg_result_t;
+
+typedef struct {
+    uint8_t  endpoint;
+    uint16_t cluster_id;
+    uint16_t attr_id;
+    uint8_t  status;
+    uint8_t  result;
+} report_cfg_record_t;
 
 // ---------------------------------------------------------------------------
 // Endpoint record
@@ -87,9 +105,13 @@ typedef struct {
     uint8_t   last_lqi;
     bool      radio_metrics_valid;
     bool      report_cfg_in_progress;
+    uint32_t  report_cfg_started_ms;
     uint16_t  report_cfg_expected;
     uint16_t  report_cfg_received;
     uint16_t  report_cfg_failed;
+    uint8_t   report_cfg_record_count;
+    bool      report_cfg_record_overflow;
+    report_cfg_record_t report_cfg_records[MAX_REPORT_CFG_TRACKED];
 
     // --- Telemetry counters (NOT persisted) ---
     uint32_t  report_attr_ok;

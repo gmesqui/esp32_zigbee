@@ -462,6 +462,27 @@ static esp_err_t zcl_on_poll_control_check_in_req(
     return ESP_OK;
 }
 
+static bool device_can_configure_reporting_now(const device_record_t *dev)
+{
+    return dev &&
+           !dev->reporting_configured &&
+           !dev->report_cfg_in_progress &&
+           dev->endpoint_count > 0 &&
+           dev->state >= DEV_STATE_INTERVIEWED;
+}
+
+static void configure_reporting_from_awake_window(device_record_t *dev,
+                                                  const char *reason)
+{
+    if (!device_can_configure_reporting_now(dev)) {
+        return;
+    }
+
+    ZB_LOG("REPORT_CFG awake window for %s reason=%s: immediate configure",
+           dm_display_name(dev), reason ? reason : "?");
+    rc_configure_device(dev);
+}
+
 // ---------------------------------------------------------------------------
 // Maintenance alarm — fires every MAINTENANCE_PERIOD_MS
 // ---------------------------------------------------------------------------
@@ -470,6 +491,7 @@ static void maintenance_alarm(uint8_t param)
 {
     (void)param;
     nvs_cache_save_dirty();
+    rc_check_reporting_timeouts();
     dm_check_presence();
     // Reschedule
     esp_zb_scheduler_alarm(maintenance_alarm, 0, MAINTENANCE_PERIOD_MS);
@@ -579,8 +601,9 @@ void esp_zb_app_signal_handler(esp_zb_app_signal_t *signal_struct)
                     ZB_LOG("DEVICE %s rejoined (already known, state=%s)",
                            dm_display_name(dev),
                            utils_device_state_name((int)dev->state));
-                    // Re-configure reporting if it was lost
-                    if (!dev->reporting_configured) {
+                    if (device_can_configure_reporting_now(dev)) {
+                        configure_reporting_from_awake_window(dev, "device_annce");
+                    } else if (!dev->reporting_configured) {
                         di_enqueue(dev);
                     }
                 }
@@ -651,6 +674,7 @@ void esp_zb_app_signal_handler(esp_zb_app_signal_t *signal_struct)
                 dm_set_online(dev, true);
             }
             dm_unlock();
+            configure_reporting_from_awake_window(dev, "device_update");
             break;
         }
 
@@ -712,8 +736,20 @@ void esp_zb_app_signal_handler(esp_zb_app_signal_t *signal_struct)
 
             dm_lock();
             device_record_t *dev = dm_find_by_nwk(p->short_addr);
-            if (dev && dm_set_online(dev, false)) {
-                ZB_LOG("DEVICE %s OFFLINE (unavailable)", dm_display_name(dev));
+            if (dev) {
+                bool fresh_sleepy = false;
+                if (dev->is_sleepy && dev->last_seen_ms != 0) {
+                    uint32_t age_ms = utils_uptime_ms() - dev->last_seen_ms;
+                    fresh_sleepy = age_ms <= rc_presence_timeout_ms(true);
+                    if (fresh_sleepy) {
+                        ZB_LOG("DEVICE %s unavailable ignored (sleepy, last_seen=%lu s ago)",
+                               dm_display_name(dev),
+                               (unsigned long)(age_ms / 1000u));
+                    }
+                }
+                if (!fresh_sleepy && dm_set_online(dev, false)) {
+                    ZB_LOG("DEVICE %s OFFLINE (unavailable)", dm_display_name(dev));
+                }
             }
             dm_unlock();
             break;
@@ -806,6 +842,11 @@ static esp_err_t zb_action_handler(esp_zb_core_action_callback_id_t cb_id,
         case ESP_ZB_CORE_CMD_READ_REPORT_CFG_RESP_CB_ID:
             rc_on_read_report_cfg_resp(
                 (const esp_zb_zcl_cmd_read_report_config_resp_message_t *)message);
+            break;
+
+        case ESP_ZB_CORE_CMD_WRITE_ATTR_RESP_CB_ID:
+            rc_on_write_attr_resp(
+                (const esp_zb_zcl_cmd_write_attr_resp_message_t *)message);
             break;
 
         case ESP_ZB_CORE_CMD_DEFAULT_RESP_CB_ID:

@@ -32,6 +32,12 @@ bool rc_device_has_reporting_pending(const device_record_t *dev);
  *  Must be called from Zigbee task context. Returns true if commands were sent. */
 bool rc_configure_pending_sleepy_now(device_record_t *dev, const char *reason);
 
+/** Clear configure-reporting sessions that did not receive all responses. */
+void rc_check_reporting_timeouts(void);
+
+/** Finish one timed-out configure-reporting session on a device. */
+void rc_mark_reporting_timeout(device_record_t *dev);
+
 /** Effective max_interval policy applied by the coordinator for reporting. */
 uint16_t rc_effective_max_interval(bool is_sleepy);
 
@@ -59,6 +65,9 @@ void rc_on_config_resp(const esp_zb_zcl_cmd_config_report_resp_message_t *msg);
 
 /** Called by zigbee_core when a Read Reporting Configuration Response arrives. */
 void rc_on_read_report_cfg_resp(const esp_zb_zcl_cmd_read_report_config_resp_message_t *msg);
+
+/** Called by zigbee_core when a Write Attributes Response arrives. */
+void rc_on_write_attr_resp(const esp_zb_zcl_cmd_write_attr_resp_message_t *msg);
 
 /** Schedule a Read Reporting Configuration request from a non-Zigbee task.
  *  Returns false if the diagnostic queue is full or the device is invalid. */

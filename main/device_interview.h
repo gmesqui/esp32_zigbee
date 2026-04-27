@@ -16,10 +16,10 @@
 //   2. POWER_DESC  — power mode and source level
 //   3. ACTIVE_EP   — list of endpoint IDs
 //   4. SIMPLE_DESC — profile, device_id, cluster lists (per endpoint)
-//   5. READ_BASIC  — manufacturer, model, power_source from cluster 0x0000
-//   6. READ_POWER  — battery voltage/% from cluster 0x0001 (if present)
-//   7. CONFIG_REPORT — configure reporting for all supported clusters
-//   8. WAIT_REPORT_CONFIG — validate Configure Reporting responses
+//   5. CONFIG_REPORT — configure reporting for all supported clusters
+//   6. WAIT_REPORT_CONFIG — validate Configure Reporting responses
+//   7. READ_BASIC  — manufacturer, model, power_source from cluster 0x0000
+//   8. READ_POWER  — battery voltage/% from cluster 0x0001 (if present)
 //
 // Only one interview runs at a time.  A lightweight FIFO queues device
 // indices when multiple devices join simultaneously.

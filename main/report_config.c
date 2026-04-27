@@ -10,6 +10,7 @@
 #include "esp_zigbee_core.h"
 
 #define RC_ZB_LOCK_WAIT_MS 1000u
+#define RC_REPORT_CFG_RESPONSE_TIMEOUT_MS 12000u
 
 // ---------------------------------------------------------------------------
 // Table of clusters we want to configure reporting for.
@@ -171,6 +172,100 @@ static bool report_cfg_applies_to_device(const device_record_t *dev,
     return device_may_have_battery(dev);
 }
 
+static void report_cfg_records_reset(device_record_t *dev)
+{
+    if (!dev) {
+        return;
+    }
+    dev->report_cfg_record_count = 0;
+    dev->report_cfg_record_overflow = false;
+    memset(dev->report_cfg_records, 0, sizeof(dev->report_cfg_records));
+}
+
+static void report_cfg_records_add(device_record_t *dev, uint8_t endpoint,
+                                   const report_cfg_entry_t *cfg)
+{
+    if (!dev || !cfg) {
+        return;
+    }
+    if (dev->report_cfg_record_count >= MAX_REPORT_CFG_TRACKED) {
+        dev->report_cfg_record_overflow = true;
+        return;
+    }
+
+    report_cfg_record_t *record =
+        &dev->report_cfg_records[dev->report_cfg_record_count++];
+    record->endpoint = endpoint;
+    record->cluster_id = cfg->cluster_id;
+    record->attr_id = cfg->attr_id;
+    record->status = ESP_ZB_ZCL_STATUS_SUCCESS;
+    record->result = REPORT_CFG_RESULT_PENDING;
+}
+
+static report_cfg_record_t *report_cfg_records_find(device_record_t *dev,
+                                                    uint8_t endpoint,
+                                                    uint16_t cluster_id,
+                                                    uint16_t attr_id,
+                                                    bool attr_known)
+{
+    if (!dev) {
+        return NULL;
+    }
+
+    for (uint8_t i = 0; i < dev->report_cfg_record_count; i++) {
+        report_cfg_record_t *record = &dev->report_cfg_records[i];
+        if (record->result != REPORT_CFG_RESULT_PENDING) {
+            continue;
+        }
+        if (record->endpoint != endpoint || record->cluster_id != cluster_id) {
+            continue;
+        }
+        if (attr_known && record->attr_id != attr_id) {
+            continue;
+        }
+        return record;
+    }
+    return NULL;
+}
+
+static void report_cfg_records_mark(device_record_t *dev, uint8_t endpoint,
+                                    uint16_t cluster_id, uint16_t attr_id,
+                                    bool attr_known, uint8_t status,
+                                    report_cfg_result_t result)
+{
+    report_cfg_record_t *record =
+        report_cfg_records_find(dev, endpoint, cluster_id, attr_id, attr_known);
+    if (!record) {
+        return;
+    }
+    record->status = status;
+    record->result = (uint8_t)result;
+}
+
+static void report_cfg_records_add_failure(device_record_t *dev,
+                                           uint8_t endpoint,
+                                           uint16_t cluster_id,
+                                           uint16_t attr_id,
+                                           uint8_t status,
+                                           report_cfg_result_t result)
+{
+    if (!dev) {
+        return;
+    }
+    if (dev->report_cfg_record_count >= MAX_REPORT_CFG_TRACKED) {
+        dev->report_cfg_record_overflow = true;
+        return;
+    }
+
+    report_cfg_record_t *record =
+        &dev->report_cfg_records[dev->report_cfg_record_count++];
+    record->endpoint = endpoint;
+    record->cluster_id = cluster_id;
+    record->attr_id = attr_id;
+    record->status = status;
+    record->result = (uint8_t)result;
+}
+
 static bool endpoint_has_coord_binding(const endpoint_record_t *ep,
                                        uint16_t cluster_id,
                                        uint64_t coord_ieee)
@@ -202,6 +297,11 @@ static void rc_on_bind_resp(esp_zb_zdp_status_t zdo_status, void *user_ctx)
     ZB_LOG("BIND_RSP %s nwk=0x%04X cluster=%s status=0x%02X",
            name, nwk_addr, utils_cluster_name(cluster_id),
            (unsigned)zdo_status);
+    if (dev && zdo_status != ESP_ZB_ZDP_STATUS_SUCCESS) {
+        report_cfg_records_add_failure(dev, 0, cluster_id, 0xFFFF,
+                                       (uint8_t)zdo_status,
+                                       REPORT_CFG_RESULT_BIND_FAIL);
+    }
 }
 
 static void bind_report_cluster_to_coord(device_record_t *dev,
@@ -352,6 +452,7 @@ size_t rc_configure_device(device_record_t *dev)
            dm_display_name(dev), dev->is_sleepy ? "sleepy" : "always-on");
 
     int configured_count = 0;
+    report_cfg_records_reset(dev);
     esp_zb_ieee_addr_t coord_addr;
     uint64_t coord_ieee = 0;
     esp_zb_get_long_address(coord_addr);
@@ -402,6 +503,7 @@ size_t rc_configure_device(device_record_t *dev)
                 rc_write_ias_cie_address(dev->nwk_addr, ep->endpoint_id);
             }
 
+            report_cfg_records_add(dev, ep->endpoint_id, cfg);
             send_config_report(dev->nwk_addr, ep->endpoint_id, dev->is_sleepy, cfg);
             configured_count++;
         }
@@ -414,6 +516,7 @@ size_t rc_configure_device(device_record_t *dev)
     dev->report_cfg_received = 0;
     dev->report_cfg_failed = 0;
     dev->report_cfg_in_progress = (configured_count > 0);
+    dev->report_cfg_started_ms = dev->report_cfg_in_progress ? utils_uptime_ms() : 0;
     bool reporting_configured = (configured_count == 0);
     if (dev->reporting_configured != reporting_configured) {
         dev->reporting_configured = reporting_configured;
@@ -424,6 +527,64 @@ size_t rc_configure_device(device_record_t *dev)
     }
 
     return (size_t)configured_count;
+}
+
+static bool rc_report_cfg_timed_out(const device_record_t *dev, uint32_t now)
+{
+    return dev && dev->report_cfg_in_progress &&
+           dev->report_cfg_started_ms != 0 &&
+           (now - dev->report_cfg_started_ms) > RC_REPORT_CFG_RESPONSE_TIMEOUT_MS;
+}
+
+void rc_mark_reporting_timeout(device_record_t *dev)
+{
+    if (!dev || !dev->report_cfg_in_progress) {
+        return;
+    }
+
+    uint16_t missing = 0;
+    for (uint8_t i = 0; i < dev->report_cfg_record_count; i++) {
+        report_cfg_record_t *record = &dev->report_cfg_records[i];
+        if (record->result == REPORT_CFG_RESULT_PENDING) {
+            record->result = REPORT_CFG_RESULT_MISSING;
+            record->status = 0xFF;
+            missing++;
+        }
+    }
+    if (missing == 0 && dev->report_cfg_expected > dev->report_cfg_received) {
+        missing = (uint16_t)(dev->report_cfg_expected - dev->report_cfg_received);
+    }
+
+    dev->report_cfg_in_progress = false;
+    dev->report_cfg_started_ms = 0;
+    if (missing > 0) {
+        dev->report_cfg_failed = (uint16_t)(dev->report_cfg_failed + missing);
+    }
+    if (dev->reporting_configured) {
+        dev->reporting_configured = false;
+        dev->dirty = true;
+    }
+}
+
+void rc_check_reporting_timeouts(void)
+{
+    uint32_t now = utils_uptime_ms();
+
+    for (uint8_t i = 0; i < MAX_DEVICES; i++) {
+        device_record_t *dev = dm_get_by_index(i);
+        if (!dev || !rc_report_cfg_timed_out(dev, now)) {
+            continue;
+        }
+
+        rc_mark_reporting_timeout(dev);
+        if (dev->state == DEV_STATE_CONFIGURED) {
+            dev->state = DEV_STATE_INTERVIEWED;
+        }
+
+        ZB_LOG("REPORT_CFG timeout for %s responses=%u/%u failed=%u",
+               dm_display_name(dev), dev->report_cfg_received,
+               dev->report_cfg_expected, dev->report_cfg_failed);
+    }
 }
 
 bool rc_device_has_reporting_pending(const device_record_t *dev)
@@ -525,17 +686,26 @@ void rc_on_config_resp(const esp_zb_zcl_cmd_config_report_resp_message_t *msg)
     bool any_fail = (msg->info.status != ESP_ZB_ZCL_STATUS_SUCCESS);
 
     const esp_zb_zcl_config_report_resp_variable_t *var = msg->variables;
+    bool has_variables = false;
     if (msg->info.status != ESP_ZB_ZCL_STATUS_SUCCESS) {
         ZB_LOG("REPORT_CFG_RSP %s ep=%u cluster=%s CMD_FAIL status=0x%02X",
                name, msg->info.src_endpoint, utils_cluster_name(msg->info.cluster),
                (unsigned)msg->info.status);
     }
     while (var) {
+        has_variables = true;
         if (var->status != ESP_ZB_ZCL_STATUS_SUCCESS) {
             ZB_LOG("REPORT_CFG_RSP %s ep=%u cluster=%s attr=0x%04X FAIL status=0x%02X",
                    name, msg->info.src_endpoint, utils_cluster_name(msg->info.cluster),
                    var->attribute_id, (unsigned)var->status);
             any_fail = true;
+            report_cfg_records_mark(dev, msg->info.src_endpoint,
+                                    msg->info.cluster, var->attribute_id, true,
+                                    var->status, REPORT_CFG_RESULT_FAIL);
+        } else {
+            report_cfg_records_mark(dev, msg->info.src_endpoint,
+                                    msg->info.cluster, var->attribute_id, true,
+                                    var->status, REPORT_CFG_RESULT_OK);
         }
         var = var->next;
     }
@@ -543,6 +713,15 @@ void rc_on_config_resp(const esp_zb_zcl_cmd_config_report_resp_message_t *msg)
     if (!any_fail) {
         ZB_LOG("REPORT_CFG_RSP %s ep=%u cluster=%s OK",
                name, msg->info.src_endpoint, utils_cluster_name(msg->info.cluster));
+    }
+    if (!has_variables) {
+        report_cfg_records_mark(dev, msg->info.src_endpoint, msg->info.cluster,
+                                0, false,
+                                msg->info.status == ESP_ZB_ZCL_STATUS_SUCCESS
+                                    ? ESP_ZB_ZCL_STATUS_SUCCESS
+                                    : msg->info.status,
+                                any_fail ? REPORT_CFG_RESULT_FAIL
+                                         : REPORT_CFG_RESULT_OK);
     }
 
     if (dev && dev->report_cfg_in_progress) {
@@ -554,6 +733,7 @@ void rc_on_config_resp(const esp_zb_zcl_cmd_config_report_resp_message_t *msg)
         }
         if (dev->report_cfg_received >= dev->report_cfg_expected) {
             dev->report_cfg_in_progress = false;
+            dev->report_cfg_started_ms = 0;
             bool reporting_configured = (dev->report_cfg_failed == 0);
             if (dev->reporting_configured != reporting_configured) {
                 dev->reporting_configured = reporting_configured;
@@ -603,6 +783,45 @@ void rc_on_read_report_cfg_resp(const esp_zb_zcl_cmd_read_report_config_resp_mes
                    var->attribute_id, var->server.timeout);
         }
         var = var->next;
+    }
+}
+
+void rc_on_write_attr_resp(const esp_zb_zcl_cmd_write_attr_resp_message_t *msg)
+{
+    if (!msg) {
+        return;
+    }
+
+    uint16_t src_nwk = msg->info.src_address.u.short_addr;
+    device_record_t *dev = dm_find_by_nwk(src_nwk);
+    const char *name = dev ? dm_display_name(dev) : "?";
+    bool any_fail = (msg->info.status != ESP_ZB_ZCL_STATUS_SUCCESS);
+
+    const esp_zb_zcl_write_attr_resp_variable_t *var = msg->variables;
+    if (msg->info.status != ESP_ZB_ZCL_STATUS_SUCCESS) {
+        ZB_LOG("WRITE_ATTR_RSP %s ep=%u cluster=%s CMD_FAIL status=0x%02X",
+               name, msg->info.src_endpoint, utils_cluster_name(msg->info.cluster),
+               (unsigned)msg->info.status);
+    }
+    while (var) {
+        if (var->status != ESP_ZB_ZCL_STATUS_SUCCESS) {
+            any_fail = true;
+            ZB_LOG("WRITE_ATTR_RSP %s ep=%u cluster=%s attr=0x%04X FAIL status=0x%02X",
+                   name, msg->info.src_endpoint, utils_cluster_name(msg->info.cluster),
+                   var->attribute_id, (unsigned)var->status);
+            report_cfg_records_add_failure(dev, msg->info.src_endpoint,
+                                           msg->info.cluster, var->attribute_id,
+                                           (uint8_t)var->status,
+                                           REPORT_CFG_RESULT_WRITE_FAIL);
+        }
+        var = var->next;
+    }
+
+    if (any_fail && !msg->variables) {
+        report_cfg_records_add_failure(dev, msg->info.src_endpoint,
+                                       msg->info.cluster, 0xFFFF,
+                                       (uint8_t)msg->info.status,
+                                       REPORT_CFG_RESULT_WRITE_FAIL);
     }
 }
 

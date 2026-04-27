@@ -21,10 +21,11 @@ typedef enum {
     ISTATE_POWER_DESC,
     ISTATE_ACTIVE_EP,
     ISTATE_SIMPLE_DESC,   // repeated per endpoint
-    ISTATE_READ_BASIC,
-    ISTATE_READ_POWER_CFG,
     ISTATE_CONFIG_REPORT,
     ISTATE_WAIT_REPORT_CONFIG,
+    ISTATE_READ_BASIC,
+    ISTATE_READ_POWER_CFG,
+    ISTATE_FINISH,
 } istate_t;
 
 typedef struct {
@@ -33,6 +34,7 @@ typedef struct {
     istate_t  state;
     uint8_t   ep_cursor;        // which endpoint we are currently querying
     uint8_t   retry;
+    bool      reporting_validated;
     bool      active;
 } interview_ctx_t;
 
@@ -123,7 +125,7 @@ static void interview_step(uint8_t dev_idx);    // dispatcher
 static void alarm_start_step(uint8_t dev_idx);  // fired by scheduler
 static void request_binding_table(device_record_t *dev, uint8_t start_index);
 static void interview_fail(uint8_t dev_idx);
-static void interview_done(uint8_t dev_idx);
+static void interview_done(uint8_t dev_idx, bool reporting_validated);
 
 static void format_attr_list(const uint16_t *attrs, uint8_t attr_count,
                              char *out, size_t out_len)
@@ -155,11 +157,7 @@ static void interview_finish_reporting_validation(uint8_t dev_idx, bool timed_ou
     }
 
     if (timed_out && dev->report_cfg_in_progress) {
-        dev->report_cfg_in_progress = false;
-        if (dev->reporting_configured) {
-            dev->reporting_configured = false;
-            dev->dirty = true;
-        }
+        rc_mark_reporting_timeout(dev);
     }
 
     if (!dev->report_cfg_in_progress &&
@@ -170,16 +168,20 @@ static void interview_finish_reporting_validation(uint8_t dev_idx, bool timed_ou
                "(responses=%u/%u failed=%u timeout=no)",
                dm_display_name(dev), dev->report_cfg_received,
                dev->report_cfg_expected, dev->report_cfg_failed);
-        interview_done(dev_idx);
-        return;
+        g_ictx.reporting_validated = true;
+    } else {
+        ZB_LOG("INTERVIEW_FINAL %s CONTINUE reporting partial "
+               "(responses=%u/%u failed=%u timeout=%s)",
+               dm_display_name(dev), dev->report_cfg_received,
+               dev->report_cfg_expected, dev->report_cfg_failed,
+               timed_out ? "yes" : "no");
+        g_ictx.reporting_validated = false;
     }
 
-    ZB_LOG("INTERVIEW_FINAL %s FAILED reporting validation "
-           "(responses=%u/%u failed=%u timeout=%s)",
-           dm_display_name(dev), dev->report_cfg_received,
-           dev->report_cfg_expected, dev->report_cfg_failed,
-           timed_out ? "yes" : "no");
-    interview_fail(dev_idx);
+    ZB_LOG("INTERVIEW %s reporting phase done, reading identity",
+           dm_display_name(dev));
+    g_ictx.state = ISTATE_READ_BASIC;
+    esp_zb_scheduler_alarm(alarm_start_step, dev_idx, 0);
 }
 
 #define BINDING_DST_ADDR_MODE_GROUP   0x01u
@@ -464,24 +466,25 @@ static void interview_fail(uint8_t dev_idx)
     }
 }
 
-static void interview_done(uint8_t dev_idx)
+static void interview_done(uint8_t dev_idx, bool reporting_validated)
 {
     device_record_t *dev = dm_get_by_index(dev_idx);
     if (dev) {
-        dev->state = DEV_STATE_CONFIGURED;
+        dev->state = reporting_validated ? DEV_STATE_CONFIGURED : DEV_STATE_INTERVIEWED;
         // Save immediately after interview
         nvs_cache_save_device(dev_idx);
-        ZB_LOG("INTERVIEW %s COMPLETE (eps=%u mfr=%s model=%s %s)",
+        ZB_LOG("INTERVIEW %s COMPLETE (eps=%u mfr=%s model=%s %s reporting=%s)",
                dm_display_name(dev), dev->endpoint_count,
                dev->manufacturer[0] ? dev->manufacturer : "?",
                dev->model[0]        ? dev->model        : "?",
-               dev->is_sleepy       ? "sleepy"          : "always-on");
+               dev->is_sleepy       ? "sleepy"          : "always-on",
+               reporting_validated  ? "validated"       : "partial");
 
         zb_event_t evt = {
             .type             = ZB_EVT_INTERVIEW,
             .ieee             = dev->ieee_addr,
             .online           = true,
-            .interview_status = "successful",
+            .interview_status = reporting_validated ? "successful" : "partial",
         };
         strncpy(evt.friendly_name, dev->friendly_name, ZB_EVT_NAME_LEN - 1);
         zb_events_emit(&evt);
@@ -554,8 +557,9 @@ static void interview_step(uint8_t dev_idx)
                        g_ictx.ep_cursor + 1, dev->endpoint_count);
                 send_simple_desc(dev->nwk_addr, ep_id, dev_idx);
             } else {
-                // All endpoints done, advance to READ_BASIC
-                g_ictx.state = ISTATE_READ_BASIC;
+                // Endpoints are enough to configure reporting; do that before
+                // slower identity reads so sleepy devices are still awake.
+                g_ictx.state = ISTATE_CONFIG_REPORT;
                 esp_zb_scheduler_alarm(alarm_start_step, dev_idx, 200);
             }
             break;
@@ -587,7 +591,7 @@ static void interview_step(uint8_t dev_idx)
                        utils_power_source_name(dev->power_source));
             }
             // Advance after short delay regardless
-            g_ictx.state = ISTATE_CONFIG_REPORT;
+            g_ictx.state = ISTATE_FINISH;
             esp_zb_scheduler_alarm(alarm_start_step, dev_idx, 1000);
             break;
         }
@@ -608,6 +612,10 @@ static void interview_step(uint8_t dev_idx)
         case ISTATE_WAIT_REPORT_CONFIG:
             interview_finish_reporting_validation(dev_idx,
                                                   dev->report_cfg_in_progress);
+            break;
+
+        case ISTATE_FINISH:
+            interview_done(dev_idx, g_ictx.reporting_validated);
             break;
 
         default:
@@ -634,6 +642,7 @@ static void start_interview(uint8_t dev_idx)
     g_ictx.state     = ISTATE_NODE_DESC;
     g_ictx.ep_cursor = 0;
     g_ictx.retry     = 0;
+    g_ictx.reporting_validated = false;
     g_ictx.active    = true;
 
     ZB_LOG("INTERVIEW %s START nwk=0x%04X (attempt %lu)",
@@ -789,8 +798,14 @@ void di_on_ieee_addr_resp(esp_zb_zdp_status_t zdo_status,
         // Replay any buffered ZCL attributes
         zcl_pending_attr_replay(ieee, nwk_addr);
 
-        // If reporting not configured yet, re-enqueue for config
-        if (!dev->reporting_configured && dev->state == DEV_STATE_CONFIGURED) {
+        if (!dev->reporting_configured && !dev->report_cfg_in_progress &&
+            dev->endpoint_count > 0 && dev->state >= DEV_STATE_INTERVIEWED) {
+            ZB_LOG("REPORT_CFG awake window for %s reason=ieee_resolve: "
+                   "immediate configure",
+                   dm_display_name(dev));
+            rc_configure_device(dev);
+        } else if (!dev->reporting_configured &&
+                   dev->state == DEV_STATE_CONFIGURED) {
             dev->state = DEV_STATE_INTERVIEWED;
             di_enqueue(dev);
         }

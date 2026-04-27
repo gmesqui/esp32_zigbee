@@ -851,6 +851,8 @@ static const char s_web_index_html[] =
 "function setMsg(t){document.getElementById('msg').textContent=t||'';}"
 "function metric(label,value,cls){return `<div class=\"metric\"><div class=\"label\">${label}</div><div class=\"value ${cls||''}\">${value}</div></div>`}"
 "function readings(d){let r=d.readings||{},a=[];for(const k of Object.keys(r)){let x=r[k];a.push(`${esc(k)}: ${esc(x.value)}${x.unit?' '+esc(x.unit):''}`)}return a.join('<br>')||'-'}"
+"function reportingLabel(r){if(!r)return'pendiente';if(r.configured)return'ok';if(r.in_progress)return'configurando';if((r.failed||0)>0)return'fallo/parcial';return'pendiente'}"
+"function reportingFailureRows(d){let rp=d.reporting||{},fs=rp.failures||[];if(!fs.length&&!rp.overflow)return '<div><span class=\"label\">Fallos reporting</span><strong>Sin fallos detallados</strong></div>';let rows=fs.map(f=>{let cname=esc(f.cluster_name||hex(f.cluster_id));let what=f.reason==='bind_fail'?('bind '+cname):(f.reason==='write_fail'?('write '+cname+' '+hex(f.attr_id)):('EP '+f.endpoint+' '+cname+' '+hex(f.attr_id)));let why=f.reason==='missing'?'sin respuesta':(f.reason==='bind_fail'?'bind status '+hex(f.status):(f.reason==='write_fail'?'write status '+hex(f.status):'status '+hex(f.status)));return `<div><span class=\"label\">${what}</span><strong>${why}</strong></div>`}).join('');if(rp.overflow)rows+='<div><span class=\"label\">Fallos reporting</span><strong>lista truncada</strong></div>';return rows}"
 "function ago(ts){let d=Math.max(0,Math.floor((lastStatus.system.uptime_s||0)-ts));return d<60?d+'s':Math.floor(d/60)+'m'}"
 "function bytes(n){if(n==null)return '-';return n>=1048576?(n/1048576).toFixed(1)+' MB':n>=1024?(n/1024).toFixed(1)+' KB':n+' B'}"
 "function hex(n){return n==null?'-':'0x'+Number(n).toString(16).toUpperCase()}"
@@ -863,7 +865,7 @@ static const char s_web_index_html[] =
 "function fillConfigForm(force){if(!cfg||(!force&&configDirty))return;document.getElementById('mdns_hostname').value=cfg.mdns_hostname;document.getElementById('mdns_instance').value=cfg.mdns_instance;document.getElementById('ntp_server').value=cfg.ntp_server;ensureTimezoneOption(cfg.timezone);document.getElementById('timezone').value=cfg.timezone;document.getElementById('permit_join_duration_s').value=cfg.permit_join_duration_s;document.getElementById('report_always_on_max_s').value=cfg.report_always_on_max_s;document.getElementById('report_sleepy_max_s').value=cfg.report_sleepy_max_s;document.getElementById('presence_grace_s').value=cfg.presence_grace_s;configDirty=false}"
 "function attrRows(d){let r=d.readings||{};let rows=Object.keys(r).map(k=>{let x=r[k];return `<tr><td>${esc(k)}</td><td>${esc(x.value)}${x.unit?' '+esc(x.unit):''}</td><td>${x.endpoint||'-'}</td><td>${hex(x.cluster_id)}</td><td>${hex(x.attr_id)}</td><td>${ago(x.ts||0)}</td></tr>`}).join('');let raw=(d.attrs||[]).map(a=>`<tr><td>raw</td><td>${esc(a.raw)}</td><td>${a.endpoint}</td><td>${hex(a.cluster_id)}</td><td>${hex(a.attr_id)} / t ${hex(a.attr_type)}</td><td>${ago(a.ts||0)}</td></tr>`).join('');return rows+raw}"
 "function endpointRows(d){return (d.endpoints||[]).map(e=>`<tr><td>${e.id}</td><td>${hex(e.profile_id)}</td><td>${hex(e.device_id)}<br>${esc(e.device_type)}</td><td>${clusters(e.in_clusters)}</td><td>${clusters(e.out_clusters)}</td></tr>`).join('')}"
-"function renderDevices(){let s=lastStatus;if(!s||editingDeviceName())return;let q=document.getElementById('deviceSearch').value.toLowerCase();let f=document.getElementById('deviceFilter').value;let rows=s.devices.filter(d=>passFilter(d,q,f)).map((d,i)=>`<tr><td><a href=\"/device?id=${encodeURIComponent(d.ieee)}\">${esc(d.name)}</a>${detail(d)}</td><td>${esc(d.ieee)}</td><td class=\"${d.online?'ok':'bad'}\">${d.online?'online':'offline'} / ${esc(d.state)}<br>reporting: ${d.reporting&&d.reporting.configured?'ok':'pendiente'}<br>${d.is_sleepy?'sleepy':'router'}</td><td>${readings(d)}</td><td>${esc(d.manufacturer||'-')} ${esc(d.model||'')}<br>${esc(d.power_source||'')}</td><td><div class=\"rename\"><input id=\"name_${i}\" value=\"${esc(d.name)}\"><button class=\"small\" onclick=\"renameDev('${d.ieee}',document.getElementById('name_${i}').value)\">Guardar</button></div><div class=\"actions\"><a class=\"small\" href=\"/device?id=${encodeURIComponent(d.ieee)}\">Abrir</a><button class=\"small secondary\" onclick=\"devAction('/api/device/reinterview','${d.ieee}')\">Re-entrevistar</button><button class=\"small secondary\" onclick=\"devAction('/api/device/configure','${d.ieee}')\">Reporting</button></div></td></tr>`).join('');document.getElementById('devices').innerHTML=rows||'<tr><td colspan=\"6\">Sin dispositivos</td></tr>'}"
+"function renderDevices(){let s=lastStatus;if(!s||editingDeviceName())return;let q=document.getElementById('deviceSearch').value.toLowerCase();let f=document.getElementById('deviceFilter').value;let rows=s.devices.filter(d=>passFilter(d,q,f)).map((d,i)=>`<tr><td><a href=\"/device?id=${encodeURIComponent(d.ieee)}\">${esc(d.name)}</a>${detail(d)}</td><td>${esc(d.ieee)}</td><td class=\"${d.online?'ok':'bad'}\">${d.online?'online':'offline'} / ${esc(d.state)}<br>reporting: ${reportingLabel(d.reporting)}<br>${d.is_sleepy?'sleepy':'router'}</td><td>${readings(d)}</td><td>${esc(d.manufacturer||'-')} ${esc(d.model||'')}<br>${esc(d.power_source||'')}</td><td><div class=\"rename\"><input id=\"name_${i}\" value=\"${esc(d.name)}\"><button class=\"small\" onclick=\"renameDev('${d.ieee}',document.getElementById('name_${i}').value)\">Guardar</button></div><div class=\"actions\"><a class=\"small\" href=\"/device?id=${encodeURIComponent(d.ieee)}\">Abrir</a><button class=\"small secondary\" onclick=\"devAction('/api/device/reinterview','${d.ieee}')\">Re-entrevistar</button><button class=\"small secondary\" onclick=\"devAction('/api/device/configure','${d.ieee}')\">Reporting</button></div></td></tr>`).join('');document.getElementById('devices').innerHTML=rows||'<tr><td colspan=\"6\">Sin dispositivos</td></tr>'}"
 "function renderEvents(){let s=lastStatus;if(!s)return;document.getElementById('events').innerHTML=(s.events||[]).map(e=>`<div class=\"event\"><span>${ago(e.ts)}</span><span>${esc(e.type)}</span><span>${esc(e.name||e.device_id||'sistema')} ${e.status?'- '+esc(e.status):''}${e.duration!=null?' ('+e.duration+'s)':''}</span></div>`).join('')||'<div class=\"msg\">Sin eventos recientes</div>'}"
 "function renderSystem(){let s=lastStatus;if(!s)return;let y=s.system||{};let rows=[['Firmware',esc((y.app_name||'app')+' '+(y.app_version||''))],['IDF',esc(y.idf_version||'-')],['Build',esc((y.build_date||'-')+' '+(y.build_time||''))],['Reset',esc(y.reset_reason||'-')],['Heap libre',bytes(y.free_heap)],['Heap interno',bytes(y.free_internal_heap)],['Heap minimo',bytes(y.min_free_heap)],['Particion',esc(y.partition_label||'-')+' / '+bytes(y.partition_size)+' @ '+hex(y.partition_address)]];document.getElementById('systemDiag').innerHTML=rows.map(x=>`<div><span class=\"label\">${x[0]}</span><strong>${x[1]}</strong></div>`).join('')}"
 "function panel(rows){return rows.map(x=>`<div><span class=\"label\">${x[0]}</span><strong>${x[1]}</strong></div>`).join('')}"
@@ -873,7 +875,7 @@ static const char s_web_index_html[] =
 "function renderConfigTime(){let t=lastStatus&&lastStatus.time||{};let cur=document.getElementById('current_time'),det=document.getElementById('current_time_detail');if(!cur||!det)return;cur.textContent=t.current_local||'Hora no sincronizada';cur.className='value '+(t.valid?'ok':'bad');det.textContent=t.valid?((t.utc_offset||'UTC?')+' | UTC '+(t.current_utc||'-')):'Esperando sincronizacion NTP'}"
 "function renderNetwork(){let s=lastStatus;if(!s)return;let n=s.network||{},t=s.time||{},sv=s.services||{};document.getElementById('networkMetrics').innerHTML=[metric('Link',n.link_up?'activo':'caido',n.link_up?'ok':'bad'),metric('IP',n.has_ip?n.ip:'sin IP',n.has_ip?'ok':'bad'),metric('mDNS',cfg.mdns_hostname+'.local'),metric('NTP',t.synced?'sincronizado':'pendiente',t.synced?'ok':'bad'),metric('Hora',t.current_local||'sin sincronizar',t.valid?'ok':'bad'),metric('WebSocket',sv.websocket_client?'conectado':'sin cliente',sv.websocket_client?'ok':''),metric('TCP consola',sv.tcp_console_client?'conectada':'sin cliente',sv.tcp_console_client?'ok':'')].join('');document.getElementById('networkDiag').innerHTML=panel([['MAC',esc(n.mac||'-')],['IP',esc(n.ip||'-')],['Mascara',esc(n.netmask||'-')],['Gateway',esc(n.gateway||'-')],['mDNS',esc(cfg.mdns_hostname+'.local')],['Nombre visible',esc(cfg.mdns_instance||'-')],['Servidor NTP',esc(t.server||cfg.ntp_server||'-')],['Zona horaria',esc(tzLabel(t.timezone||cfg.timezone||'-'))],['Hora local',esc(t.current_local||'-')],['Hora UTC',esc(t.current_utc||'-')],['Offset UTC',esc(t.utc_offset||'-')],['Ultimo sync',t.last_sync_uptime_s?ago(t.last_sync_uptime_s):'-']])}"
 "function renderZigbee(){let s=lastStatus;if(!s)return;let z=s.zigbee||{},p=s.permit_join||{},u=s.summary||{};document.getElementById('zigbeeMetrics').innerHTML=[metric('Estado',z.ready?'listo':'iniciando',z.ready?'ok':'bad'),metric('Canal',z.ready?z.channel:'-'),metric('PAN ID',z.ready?hex(z.pan_id):'-'),metric('Join',p.active?('abierto '+p.remaining_s+'s'):'cerrado',p.active?'ok':''),metric('Dispositivos',s.device_count+'/'+s.device_capacity),metric('Online',s.online_devices),metric('Sleepy/router',(u.sleepy_devices||0)+'/'+(u.router_devices||0)),metric('Pendientes',(u.reporting_pending||0)+' reporting / '+(u.interview_active||0)+' entrevista',u.reporting_pending||u.interview_active?'bad':'ok')].join('');document.getElementById('zigbeeDiag').innerHTML=panel([['Extended PAN',esc(z.ext_pan_id||'-')],['Coordinador IEEE',esc(z.coordinator_ieee||'-')],['Canal/PAN',z.ready?esc(z.channel+' / '+hex(z.pan_id)):'-'],['Permit join',p.active?esc('abierto '+p.remaining_s+'s'):'cerrado'],['Routers / sleepy',(u.router_devices||0)+' / '+(u.sleepy_devices||0)],['Reporting pendiente',String(u.reporting_pending||0)],['Entrevistas activas',String(u.interview_active||0)]]);document.getElementById('zigbeeEvents').innerHTML=(s.events||[]).filter(e=>e.type!=='device_updated'||e.device_id).slice(0,12).map(e=>`<div class=\"event\"><span>${ago(e.ts)}</span><span>${esc(e.type)}</span><span>${esc(e.name||e.device_id||'sistema')} ${e.status?'- '+esc(e.status):''}</span></div>`).join('')||'<div class=\"msg\">Sin eventos Zigbee recientes</div>'}"
-"function renderDevicePage(){let s=lastStatus;if(!s||editingDeviceName())return;let id=new URLSearchParams(location.search).get('id');let box=document.getElementById('devicePage');if(!box)return;if(!id){box.innerHTML='<h2>Dispositivo</h2><div class=\"msg\">Selecciona un dispositivo desde la lista.</div>';return}let d=deviceById(id);if(!d){box.innerHTML='<h2>Dispositivo</h2><div class=\"msg\">No encontrado: '+esc(id)+'</div>';return}let rp=d.reporting||{},st=d.stats||{};let ev=(s.events||[]).filter(e=>String(e.device_id).toLowerCase()===String(d.ieee).toLowerCase()).slice(0,8).map(e=>`<div class=\"event\"><span>${ago(e.ts)}</span><span>${esc(e.type)}</span><span>${esc(e.status||'')}</span></div>`).join('')||'<div class=\"msg\">Sin eventos recientes para este dispositivo</div>';box.innerHTML=`<div class=\"deviceTitle\"><div><h2>${esc(d.name)}</h2><span class=\"pill\">${esc(d.ieee)}</span><span class=\"pill\">${d.online?'online':'offline'}</span><span class=\"pill\">${d.is_sleepy?'sleepy':'router'}</span></div><div class=\"actions\"><a class=\"small\" href=\"/devices\">Volver</a><button class=\"small secondary\" onclick=\"devAction('/api/device/reinterview','${d.ieee}')\">Re-entrevistar</button><button class=\"small secondary\" onclick=\"devAction('/api/device/configure','${d.ieee}')\">Reporting</button></div></div><div class=\"grid\">${metric('Estado',esc(d.state),d.online?'ok':'bad')}${metric('Visto hace',ago(d.last_seen_s||0))}${metric('Reporting',(rp.configured?'ok':'pendiente')+' '+(rp.received||0)+'/'+(rp.expected||0),rp.configured?'ok':'bad')}${metric('LQI/RSSI',(d.lqi!=null?d.lqi:'-')+' / '+(d.rssi!=null?d.rssi:'-'))}</div><div class=\"panel\">${panel([['Fabricante',esc(d.manufacturer||'-')],['Modelo',esc(d.model||'-')],['Alimentacion',esc(d.power_source||'-')],['Intentos entrevista',String(st.interview_attempts||0)],['Reports ok/igual',(st.report_attr_ok||0)+' / '+(st.report_attr_unchanged||0)],['Read ok/fail',(st.read_rsp_ok||0)+' / '+(st.read_rsp_fail||0)],['Reporting fallos',String(rp.failed||0)]])}</div><h2>Nombre</h2><div class=\"rename\"><input id=\"deviceName\" value=\"${esc(d.name)}\"><button onclick=\"renameDev('${d.ieee}',document.getElementById('deviceName').value)\">Guardar</button></div><h2>Endpoints</h2><table><thead><tr><th>EP</th><th>Perfil</th><th>Tipo</th><th>Clusters in</th><th>Clusters out</th></tr></thead><tbody>${endpointRows(d)||'<tr><td colspan=\"5\">Sin endpoints</td></tr>'}</tbody></table><h2>Atributos cacheados</h2><table><thead><tr><th>Nombre</th><th>Valor</th><th>EP</th><th>Cluster</th><th>Atributo</th><th>Edad</th></tr></thead><tbody>${attrRows(d)||'<tr><td colspan=\"6\">Sin atributos cacheados</td></tr>'}</tbody></table><h2>Eventos</h2><div class=\"events\">${ev}</div>`}"
+"function renderDevicePage(){let s=lastStatus;if(!s||editingDeviceName())return;let id=new URLSearchParams(location.search).get('id');let box=document.getElementById('devicePage');if(!box)return;if(!id){box.innerHTML='<h2>Dispositivo</h2><div class=\"msg\">Selecciona un dispositivo desde la lista.</div>';return}let d=deviceById(id);if(!d){box.innerHTML='<h2>Dispositivo</h2><div class=\"msg\">No encontrado: '+esc(id)+'</div>';return}let rp=d.reporting||{},st=d.stats||{};let ev=(s.events||[]).filter(e=>String(e.device_id).toLowerCase()===String(d.ieee).toLowerCase()).slice(0,8).map(e=>`<div class=\"event\"><span>${ago(e.ts)}</span><span>${esc(e.type)}</span><span>${esc(e.status||'')}</span></div>`).join('')||'<div class=\"msg\">Sin eventos recientes para este dispositivo</div>';box.innerHTML=`<div class=\"deviceTitle\"><div><h2>${esc(d.name)}</h2><span class=\"pill\">${esc(d.ieee)}</span><span class=\"pill\">${d.online?'online':'offline'}</span><span class=\"pill\">${d.is_sleepy?'sleepy':'router'}</span></div><div class=\"actions\"><a class=\"small\" href=\"/devices\">Volver</a><button class=\"small secondary\" onclick=\"devAction('/api/device/reinterview','${d.ieee}')\">Re-entrevistar</button><button class=\"small secondary\" onclick=\"devAction('/api/device/configure','${d.ieee}')\">Reporting</button></div></div><div class=\"grid\">${metric('Estado',esc(d.state),d.online?'ok':'bad')}${metric('Visto hace',ago(d.last_seen_s||0))}${metric('Reporting',reportingLabel(rp)+' '+(rp.received||0)+'/'+(rp.expected||0),rp.configured?'ok':'bad')}${metric('LQI/RSSI',(d.lqi!=null?d.lqi:'-')+' / '+(d.rssi!=null?d.rssi:'-'))}</div><div class=\"panel\">${panel([['Fabricante',esc(d.manufacturer||'-')],['Modelo',esc(d.model||'-')],['Alimentacion',esc(d.power_source||'-')],['Intentos entrevista',String(st.interview_attempts||0)],['Reports ok/igual',(st.report_attr_ok||0)+' / '+(st.report_attr_unchanged||0)],['Read ok/fail',(st.read_rsp_ok||0)+' / '+(st.read_rsp_fail||0)],['Reporting fallos',String(rp.failed||0)]])}</div><h2>Reporting</h2><div class=\"panel\">${reportingFailureRows(d)}</div><h2>Nombre</h2><div class=\"rename\"><input id=\"deviceName\" value=\"${esc(d.name)}\"><button onclick=\"renameDev('${d.ieee}',document.getElementById('deviceName').value)\">Guardar</button></div><h2>Endpoints</h2><table><thead><tr><th>EP</th><th>Perfil</th><th>Tipo</th><th>Clusters in</th><th>Clusters out</th></tr></thead><tbody>${endpointRows(d)||'<tr><td colspan=\"5\">Sin endpoints</td></tr>'}</tbody></table><h2>Atributos cacheados</h2><table><thead><tr><th>Nombre</th><th>Valor</th><th>EP</th><th>Cluster</th><th>Atributo</th><th>Edad</th></tr></thead><tbody>${attrRows(d)||'<tr><td colspan=\"6\">Sin atributos cacheados</td></tr>'}</tbody></table><h2>Eventos</h2><div class=\"events\">${ev}</div>`}"
 "function exportStatus(){if(!lastStatus)return;let blob=new Blob([JSON.stringify(lastStatus,null,2)],{type:'application/json'});let url=URL.createObjectURL(blob);let a=document.createElement('a');a.href=url;a.download='esp32-zigbee-status.json';a.click();setTimeout(()=>URL.revokeObjectURL(url),1000)}"
 "function pageName(){let p=location.pathname;return p==='/devices'?'devices':p==='/device'?'device':p==='/zigbee'?'zigbee':p==='/network'?'network':p==='/events'?'events':p==='/config'?'config':p==='/actions'?'actions':'status'}"
 "function showPage(){let p=pageName();document.querySelectorAll('.page').forEach(x=>x.classList.toggle('active',x.id==='page-'+p));document.querySelectorAll('nav a').forEach(x=>x.classList.toggle('active',x.dataset.page===(p==='device'?'devices':p)))}"
@@ -1815,6 +1817,59 @@ static void web_json_stream_device_endpoints(web_json_stream_t *s,
     web_json_stream_char(s, ']');
 }
 
+static const char *web_report_cfg_reason(uint8_t result)
+{
+    switch ((report_cfg_result_t)result) {
+        case REPORT_CFG_RESULT_FAIL:
+            return "fail";
+        case REPORT_CFG_RESULT_MISSING:
+            return "missing";
+        case REPORT_CFG_RESULT_BIND_FAIL:
+            return "bind_fail";
+        case REPORT_CFG_RESULT_WRITE_FAIL:
+            return "write_fail";
+        default:
+            return "unknown";
+    }
+}
+
+static void web_json_stream_reporting_failures(web_json_stream_t *s,
+                                               const device_record_t *dev)
+{
+    bool first = true;
+
+    web_json_stream_text(s, "\"failures\":[");
+    if (dev) {
+        for (uint8_t i = 0; i < dev->report_cfg_record_count; i++) {
+            const report_cfg_record_t *record = &dev->report_cfg_records[i];
+            if (record->result != REPORT_CFG_RESULT_FAIL &&
+                record->result != REPORT_CFG_RESULT_MISSING &&
+                record->result != REPORT_CFG_RESULT_BIND_FAIL &&
+                record->result != REPORT_CFG_RESULT_WRITE_FAIL) {
+                continue;
+            }
+            if (!first) {
+                web_json_stream_char(s, ',');
+            }
+            first = false;
+            web_json_stream_printf(s,
+                                   "{\"endpoint\":%u,\"cluster_id\":%u,"
+                                   "\"attr_id\":%u,\"status\":%u,\"reason\":",
+                                   record->endpoint, record->cluster_id,
+                                   record->attr_id, record->status);
+            web_json_stream_string(s, web_report_cfg_reason(record->result));
+            web_json_stream_text(s, ",\"cluster_name\":");
+            web_json_stream_string(s, utils_cluster_name(record->cluster_id));
+            web_json_stream_char(s, '}');
+        }
+    }
+    web_json_stream_char(s, ']');
+    web_json_stream_printf(s, ",\"overflow\":%s",
+                           dev && dev->report_cfg_record_overflow
+                               ? "true"
+                               : "false");
+}
+
 static void web_json_stream_recent_events(web_json_stream_t *s)
 {
     web_event_entry_t snapshot[WEB_EVENT_HISTORY_LEN];
@@ -2135,17 +2190,19 @@ static esp_err_t web_get_status_handler(httpd_req_t *req)
         web_json_stream_printf(&out,
                                ",\"last_seen_s\":%lu,\"reporting\":{"
                                "\"configured\":%s,\"in_progress\":%s,"
-                               "\"expected\":%u,\"received\":%u,\"failed\":%u},"
-                               "\"stats\":{\"report_attr_ok\":%lu,"
-                               "\"report_attr_unchanged\":%lu,"
-                               "\"read_rsp_ok\":%lu,\"read_rsp_fail\":%lu,"
-                               "\"interview_attempts\":%lu}",
+                               "\"expected\":%u,\"received\":%u,\"failed\":%u,",
                                (unsigned long)(dev_snapshot->last_seen_ms / 1000u),
                                dev_snapshot->reporting_configured ? "true" : "false",
                                dev_snapshot->report_cfg_in_progress ? "true" : "false",
                                dev_snapshot->report_cfg_expected,
                                dev_snapshot->report_cfg_received,
-                               dev_snapshot->report_cfg_failed,
+                               dev_snapshot->report_cfg_failed);
+        web_json_stream_reporting_failures(&out, dev_snapshot);
+        web_json_stream_printf(&out,
+                               "},\"stats\":{\"report_attr_ok\":%lu,"
+                               "\"report_attr_unchanged\":%lu,"
+                               "\"read_rsp_ok\":%lu,\"read_rsp_fail\":%lu,"
+                               "\"interview_attempts\":%lu}",
                                (unsigned long)dev_snapshot->report_attr_ok,
                                (unsigned long)dev_snapshot->report_attr_unchanged,
                                (unsigned long)dev_snapshot->read_rsp_ok,
