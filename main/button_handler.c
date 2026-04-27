@@ -12,6 +12,7 @@
 
 #define DEBOUNCE_MS         200u
 #define BUTTON_ZB_LOCK_WAIT_MS 1000u
+#define BUTTON_TASK_STACK_SIZE 4096u
 
 // ---------------------------------------------------------------------------
 // Internal state
@@ -181,8 +182,8 @@ void button_handler_init(void)
         return;
     }
 
-    // Button processing task (small stack — just queued actions)
-    if (xTaskCreate(btn_task, "btn_task", 2048, NULL, 3, NULL) != pdPASS) {
+    // Button actions call Zigbee APIs and ZB_LOG, so keep printf/newlib headroom.
+    if (xTaskCreate(btn_task, "btn_task", BUTTON_TASK_STACK_SIZE, NULL, 3, NULL) != pdPASS) {
         ZB_LOG("ERROR button_handler: btn_task creation failed");
         return;
     }

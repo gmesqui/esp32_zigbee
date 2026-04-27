@@ -4,6 +4,7 @@ build-*/
 build_log.txt
 build_stdout.txt
 build_stderr.txt
+logs/
 
 # Managed components (downloaded automatically)
 managed_components/
