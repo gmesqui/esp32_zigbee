@@ -28,6 +28,7 @@ export interface InventoryDevice {
   manufacturer?: string;
   model?: string;
   power_source?: string;
+  is_sleepy?: boolean;
   capabilities: string[];
 }
 
@@ -111,6 +112,7 @@ export function normalizeInventoryDevice(device: InventoryDevice): InventoryDevi
     manufacturer: device.manufacturer?.trim() || 'Unknown',
     model: device.model?.trim() || 'Unknown',
     power_source: device.power_source?.trim() || 'unknown',
+    is_sleepy: device.is_sleepy === true,
     capabilities: Array.isArray(device.capabilities)
       ? [...new Set(device.capabilities.map(capability => String(capability).trim()).filter(Boolean))]
       : [],
@@ -131,6 +133,22 @@ export function supportsHomeKitPrimaryService(device: InventoryDevice): boolean 
 
 export function supportsCapability(device: InventoryDevice | undefined, capability: string): boolean {
   return !!device && device.capabilities.includes(capability);
+}
+
+export function deviceMayHaveBattery(device: InventoryDevice | undefined): boolean {
+  if (!device) {
+    return false;
+  }
+
+  const powerSource = device.power_source ?? 'unknown';
+  if (powerSource === 'unknown') {
+    return device.is_sleepy === true;
+  }
+  return ['battery', 'emergency_mains_batt'].includes(powerSource);
+}
+
+export function supportsBatteryService(device: InventoryDevice | undefined): boolean {
+  return supportsCapability(device, 'battery_sensor') && deviceMayHaveBattery(device);
 }
 
 export function clampNumber(value: number, min: number, max: number): number {

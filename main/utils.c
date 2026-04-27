@@ -257,6 +257,13 @@ const char *utils_power_source_name(uint8_t ps)
     }
 }
 
+bool utils_power_source_may_have_battery(uint8_t ps)
+{
+    return ps == 0x00 ||  // unknown: keep probing until Basic 0x0007 is known
+           ps == 0x03 ||  // battery
+           ps == 0x05;    // emergency mains with battery backup
+}
+
 // ---------------------------------------------------------------------------
 // Device state name
 // ---------------------------------------------------------------------------

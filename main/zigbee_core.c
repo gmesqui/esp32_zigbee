@@ -20,6 +20,8 @@
 #include "zcl/esp_zigbee_zcl_command.h"
 #include "zcl/esp_zigbee_zcl_poll_control.h"
 #include "zcl/esp_zigbee_zcl_time.h"
+#include "zboss_api.h"
+#include "zcl/zb_zcl_poll_control.h"
 #include "aps/esp_zigbee_aps.h"
 #include "platform/esp_zigbee_platform.h"
 #include "esp_check.h"
@@ -46,6 +48,7 @@
 #define TIME_STATUS_MASTER_BIT          (1u << 0)
 #define TIME_STATUS_SYNCHRONIZED_BIT    (1u << 1)
 #define TIME_STATUS_MASTER_ZONE_DST_BIT (1u << 2)
+#define POLL_CTRL_FAST_POLL_TIMEOUT_QS  120u
 
 static volatile bool s_network_ready = false;
 static bool s_time_attr_refresh_started = false;
@@ -215,12 +218,36 @@ static void log_generic_zcl_message(esp_zb_core_action_callback_id_t cb_id,
            msg->info.status, msg->info.header.rssi);
 }
 
+static void touch_generic_zcl_source(esp_zb_core_action_callback_id_t cb_id,
+                                     const void *message)
+{
+    if (!message || !zb_action_has_cmd_info(cb_id)) {
+        return;
+    }
+
+    const zb_cmd_info_message_t *msg = (const zb_cmd_info_message_t *)message;
+    uint16_t src_nwk = msg->info.src_address.u.short_addr;
+    device_record_t *dev = dm_find_by_nwk(src_nwk);
+    if (!dev) {
+        return;
+    }
+
+    int8_t rssi = msg->info.header.rssi;
+    if (rssi != 0) {
+        dm_touch(dev, esp_zb_rssi_to_lqi(rssi), rssi);
+    } else {
+        dm_touch(dev, 0, 0);
+    }
+}
+
 static bool zb_aps_data_indication_handler(esp_zb_apsde_data_ind_t ind)
 {
     device_record_t *dev = dm_find_by_nwk(ind.src_short_addr);
     if (!dev) {
         return false;
     }
+
+    dm_touch(dev, 0, 0);
 
     char asdu_preview[64];
     format_hex_preview(ind.asdu, (size_t)ind.asdu_length,
@@ -367,6 +394,41 @@ static void start_time_attr_refresh(void)
     esp_zb_scheduler_alarm(time_attr_update_alarm, 0, 0);
 }
 
+static uint16_t poll_control_fast_poll_timeout(uint16_t device_timeout_qs)
+{
+    if (device_timeout_qs == 0 || device_timeout_qs > POLL_CTRL_FAST_POLL_TIMEOUT_QS) {
+        return POLL_CTRL_FAST_POLL_TIMEOUT_QS;
+    }
+    return device_timeout_qs;
+}
+
+static void send_poll_control_check_in_response(uint16_t nwk_addr,
+                                                uint8_t endpoint,
+                                                bool start_fast_poll,
+                                                uint16_t timeout_qs)
+{
+    zb_bufid_t buf = zb_buf_get_out();
+    if (buf == ZB_BUF_INVALID) {
+        ZB_LOG("POLL_CTRL CHECK_IN_RSP dst=0x%04X/%u no buffer",
+               nwk_addr, endpoint);
+        return;
+    }
+
+    ZB_LOG("POLL_CTRL CHECK_IN_RSP dst=0x%04X/%u start=%u timeout_qs=%u",
+           nwk_addr, endpoint, start_fast_poll ? 1u : 0u, timeout_qs);
+    ZB_ZCL_POLL_CONTROL_SEND_CHECK_IN_RES(
+        buf,
+        nwk_addr,
+        ZB_APS_ADDR_MODE_16_ENDP_PRESENT,
+        endpoint,
+        COORD_ENDPOINT,
+        HA_PROFILE_ID,
+        ZB_TRUE,
+        NULL,
+        start_fast_poll ? ZB_TRUE : ZB_FALSE,
+        timeout_qs);
+}
+
 static esp_err_t zcl_on_poll_control_check_in_req(
     const esp_zb_zcl_poll_control_check_in_req_message_t *msg)
 {
@@ -379,10 +441,22 @@ static esp_err_t zcl_on_poll_control_check_in_req(
         ZB_LOG("POLL_CTRL CHECK_IN src=%s/%u timeout_qs=%u status=0x%02X",
                dm_display_name(dev), msg->src_ep_id,
                msg->fast_poll_timeout, msg->info.status);
+        dm_touch(dev, 0, 0);
     } else {
         ZB_LOG("POLL_CTRL CHECK_IN src=0x%04X/%u timeout_qs=%u status=0x%02X",
                msg->src_short_addr, msg->src_ep_id,
                msg->fast_poll_timeout, msg->info.status);
+    }
+
+    bool start_fast_poll = rc_device_has_reporting_pending(dev);
+    uint16_t timeout_qs = start_fast_poll
+        ? poll_control_fast_poll_timeout(msg->fast_poll_timeout)
+        : 0;
+    send_poll_control_check_in_response(msg->src_short_addr, msg->src_ep_id,
+                                        start_fast_poll, timeout_qs);
+
+    if (start_fast_poll) {
+        rc_configure_pending_sleepy_now(dev, "poll_check_in");
     }
 
     return ESP_OK;
@@ -711,6 +785,7 @@ static esp_err_t zb_action_handler(esp_zb_core_action_callback_id_t cb_id,
     esp_err_t ret = ESP_OK;
 
     log_generic_zcl_message(cb_id, message);
+    touch_generic_zcl_source(cb_id, message);
 
     switch (cb_id) {
         case ESP_ZB_CORE_REPORT_ATTR_CB_ID:

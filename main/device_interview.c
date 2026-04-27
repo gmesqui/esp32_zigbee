@@ -339,6 +339,17 @@ static bool endpoint_has_in_cluster(const endpoint_record_t *ep, uint16_t cluste
     return false;
 }
 
+static bool device_may_have_battery(const device_record_t *dev)
+{
+    if (!dev) {
+        return false;
+    }
+    if (dev->power_source == 0x00) {
+        return dev->is_sleepy;
+    }
+    return utils_power_source_may_have_battery(dev->power_source);
+}
+
 static void probe_device_state(device_record_t *dev)
 {
     if (!dev) return;
@@ -356,6 +367,9 @@ static void probe_device_state(device_record_t *dev)
 
         for (size_t i = 0; i < sizeof(k_startup_refresh_table) / sizeof(k_startup_refresh_table[0]); i++) {
             const startup_refresh_entry_t *entry = &k_startup_refresh_table[i];
+            if (entry->cluster_id == 0x0001 && !device_may_have_battery(dev)) {
+                continue;
+            }
             if (!endpoint_has_in_cluster(ep, entry->cluster_id)) continue;
 
             ZB_LOG("STARTUP_PROBE %s READ cluster=%s ep=%u attrs=%u",
@@ -563,10 +577,14 @@ static void interview_step(uint8_t dev_idx)
         case ISTATE_READ_POWER_CFG:
         {
             uint8_t ep_id = 1;
-            if (dm_has_in_cluster(dev, 0x0001, &ep_id)) {
+            if (device_may_have_battery(dev) && dm_has_in_cluster(dev, 0x0001, &ep_id)) {
                 ZB_LOG("INTERVIEW %s STEP_READ_POWER_CFG ep=%u",
                        dm_display_name(dev), ep_id);
                 send_read_power_cfg(dev->nwk_addr, ep_id);
+            } else if (dm_has_in_cluster(dev, 0x0001, NULL)) {
+                ZB_LOG("INTERVIEW %s STEP_READ_POWER_CFG skipped power_source=%s",
+                       dm_display_name(dev),
+                       utils_power_source_name(dev->power_source));
             }
             // Advance after short delay regardless
             g_ictx.state = ISTATE_CONFIG_REPORT;

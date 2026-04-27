@@ -25,6 +25,13 @@ size_t rc_configure_device(device_record_t *dev);
 /** Schedule configure-reporting from a non-Zigbee task. */
 void rc_configure_device_async(device_record_t *dev);
 
+/** True when a sleepy device still has reporting work pending or in flight. */
+bool rc_device_has_reporting_pending(const device_record_t *dev);
+
+/** Configure pending sleepy reporting while the device is known to be awake.
+ *  Must be called from Zigbee task context. Returns true if commands were sent. */
+bool rc_configure_pending_sleepy_now(device_record_t *dev, const char *reason);
+
 /** Effective max_interval policy applied by the coordinator for reporting. */
 uint16_t rc_effective_max_interval(bool is_sleepy);
 

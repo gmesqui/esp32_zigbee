@@ -71,6 +71,17 @@ static void append_capability(char **p, char *end, bool *first,
     ws_json_append_string(p, end, capability);
 }
 
+static bool device_may_have_battery(const device_record_t *dev)
+{
+    if (!dev) {
+        return false;
+    }
+    if (dev->power_source == 0x00) {
+        return dev->is_sleepy;
+    }
+    return utils_power_source_may_have_battery(dev->power_source);
+}
+
 static void append_capabilities(char **p, char *end, const device_record_t *dev)
 {
     bool first = true;
@@ -97,7 +108,7 @@ static void append_capabilities(char **p, char *end, const device_record_t *dev)
     if (dm_has_in_cluster(dev, 0x0406, NULL)) {
         append_capability(p, end, &first, "occupancy_sensor");
     }
-    if (dm_has_in_cluster(dev, 0x0001, NULL)) {
+    if (dm_has_in_cluster(dev, 0x0001, NULL) && device_may_have_battery(dev)) {
         append_capability(p, end, &first, "battery_sensor");
     }
     if (dm_has_in_cluster(dev, 0x0B04, NULL)) {
@@ -123,6 +134,7 @@ void ws_model_append_inventory_device(char **p, char *end,
     ws_json_append_string(p, end, dev->model);
     ws_json_append(p, end, ",\"power_source\":");
     ws_json_append_string(p, end, utils_power_source_name(dev->power_source));
+    ws_json_append(p, end, ",\"is_sleepy\":%s", dev->is_sleepy ? "true" : "false");
     ws_json_append(p, end, ",");
     append_capabilities(p, end, dev);
     ws_json_append(p, end, "}");
@@ -329,4 +341,3 @@ void ws_model_append_event_change(char **p, char *end, const zb_event_t *evt)
                                       utils_uptime_ms() / 1000u);
     ws_json_append(p, end, "}");
 }
-

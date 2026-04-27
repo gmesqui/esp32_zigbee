@@ -2,6 +2,7 @@
 #include "zb_events.h"
 #include "device_manager.h"
 #include "device_interview.h"
+#include "report_config.h"
 #include "led_driver.h"
 #include "utils.h"
 #include <string.h>
@@ -354,6 +355,17 @@ static bool endpoint_has_in_cluster(const endpoint_record_t *ep, uint16_t cluste
     return false;
 }
 
+static bool device_may_have_battery(const device_record_t *dev)
+{
+    if (!dev) {
+        return false;
+    }
+    if (dev->power_source == 0x00) {
+        return dev->is_sleepy;
+    }
+    return utils_power_source_may_have_battery(dev->power_source);
+}
+
 static bool is_recent_probe(const device_record_t *dev)
 {
     if (!dev || dev->last_probe_ms == 0) {
@@ -382,6 +394,9 @@ static void maybe_probe_sleepy_device(device_record_t *dev, uint8_t ep,
     bool sent_any_probe = false;
     for (size_t i = 0; i < sizeof(k_sleepy_probe_table) / sizeof(k_sleepy_probe_table[0]); i++) {
         const sleepy_probe_entry_t *entry = &k_sleepy_probe_table[i];
+        if (entry->cluster_id == 0x0001 && !device_may_have_battery(dev)) {
+            continue;
+        }
         if (!endpoint_has_in_cluster(endpoint, entry->cluster_id)) {
             continue;
         }
@@ -660,6 +675,7 @@ esp_err_t zcl_on_report_attr(const esp_zb_zcl_report_attr_message_t *msg)
                       msg->attribute.id, msg->attribute.data.type,
                       msg->attribute.data.value, true);
 
+    rc_configure_pending_sleepy_now(dev, "attribute_report");
     maybe_probe_sleepy_device(dev, src_ep, cluster, msg->attribute.id);
 
     return ESP_OK;
@@ -807,6 +823,7 @@ esp_err_t zcl_on_ias_zone_status(
     uint8_t  val[2] = { (uint8_t)(status & 0xFF), (uint8_t)(status >> 8) };
     process_attribute(dev, msg->info.src_endpoint, 0x0500,
                       0x0002, 0x19 /*bitmap16*/, val, true);
+    rc_configure_pending_sleepy_now(dev, "ias_status");
 
     return ESP_OK;
 }

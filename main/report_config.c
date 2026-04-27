@@ -55,6 +55,8 @@ static const report_cfg_entry_t k_report_table[] = {
 
 #define READ_REPORT_CFG_QUEUE_LEN           4
 
+#define BIND_DST_ADDR_MODE_IEEE             0x03u
+
 typedef struct {
     uint64_t ieee_addr;
     uint16_t nwk_addr;
@@ -139,6 +141,95 @@ static bool endpoint_has_input_cluster(const endpoint_record_t *ep, uint16_t clu
         }
     }
     return false;
+}
+
+static bool report_cfg_is_battery_attr(const report_cfg_entry_t *cfg)
+{
+    return cfg &&
+           cfg->cluster_id == 0x0001 &&
+           (cfg->attr_id == 0x0020 || cfg->attr_id == 0x0021);
+}
+
+static bool device_may_have_battery(const device_record_t *dev)
+{
+    if (!dev) {
+        return true;
+    }
+    if (dev->power_source == 0x00) {
+        return dev->is_sleepy;
+    }
+    return utils_power_source_may_have_battery(dev->power_source);
+}
+
+static bool report_cfg_applies_to_device(const device_record_t *dev,
+                                         const report_cfg_entry_t *cfg)
+{
+    if (!report_cfg_is_battery_attr(cfg)) {
+        return true;
+    }
+
+    return device_may_have_battery(dev);
+}
+
+static bool endpoint_has_coord_binding(const endpoint_record_t *ep,
+                                       uint16_t cluster_id,
+                                       uint64_t coord_ieee)
+{
+    if (!ep || coord_ieee == 0) {
+        return false;
+    }
+
+    for (int i = 0; i < ep->binding_count; i++) {
+        const binding_record_t *binding = &ep->bindings[i];
+        if (binding->cluster_id == cluster_id &&
+            binding->dst_addr_mode == BIND_DST_ADDR_MODE_IEEE &&
+            binding->dst_ieee_addr == coord_ieee &&
+            binding->dst_endpoint == COORD_ENDPOINT) {
+            return true;
+        }
+    }
+    return false;
+}
+
+static void rc_on_bind_resp(esp_zb_zdp_status_t zdo_status, void *user_ctx)
+{
+    uint32_t packed = (uint32_t)(uintptr_t)user_ctx;
+    uint16_t nwk_addr = (uint16_t)(packed & 0xFFFFu);
+    uint16_t cluster_id = (uint16_t)(packed >> 16);
+    device_record_t *dev = dm_find_by_nwk(nwk_addr);
+    const char *name = dev ? dm_display_name(dev) : "?";
+
+    ZB_LOG("BIND_RSP %s nwk=0x%04X cluster=%s status=0x%02X",
+           name, nwk_addr, utils_cluster_name(cluster_id),
+           (unsigned)zdo_status);
+}
+
+static void bind_report_cluster_to_coord(device_record_t *dev,
+                                         endpoint_record_t *ep,
+                                         uint16_t cluster_id,
+                                         uint64_t coord_ieee)
+{
+    if (!dev || !ep || endpoint_has_coord_binding(ep, cluster_id, coord_ieee)) {
+        return;
+    }
+
+    esp_zb_zdo_bind_req_param_t req;
+    memset(&req, 0, sizeof(req));
+    memcpy(req.src_address, &dev->ieee_addr, sizeof(req.src_address));
+    req.src_endp = ep->endpoint_id;
+    req.cluster_id = cluster_id;
+    req.dst_addr_mode = ESP_ZB_ZDO_BIND_DST_ADDR_MODE_64_BIT_EXTENDED;
+    memcpy(req.dst_address_u.addr_long, &coord_ieee,
+           sizeof(req.dst_address_u.addr_long));
+    req.dst_endp = COORD_ENDPOINT;
+    req.req_dst_addr = dev->nwk_addr;
+
+    ZB_LOG("BIND_REQ %s ep=%u cluster=%s -> coord_ep=%u",
+           dm_display_name(dev), ep->endpoint_id,
+           utils_cluster_name(cluster_id), COORD_ENDPOINT);
+    esp_zb_zdo_device_bind_req(
+        &req, rc_on_bind_resp,
+        (void *)(uintptr_t)(((uint32_t)cluster_id << 16) | dev->nwk_addr));
 }
 
 size_t rc_get_configured_reportings_for_endpoint(const endpoint_record_t *ep,
@@ -261,9 +352,15 @@ size_t rc_configure_device(device_record_t *dev)
            dm_display_name(dev), dev->is_sleepy ? "sleepy" : "always-on");
 
     int configured_count = 0;
+    esp_zb_ieee_addr_t coord_addr;
+    uint64_t coord_ieee = 0;
+    esp_zb_get_long_address(coord_addr);
+    memcpy(&coord_ieee, coord_addr, sizeof(coord_ieee));
 
     for (int e = 0; e < dev->endpoint_count; e++) {
         endpoint_record_t *ep = &dev->endpoints[e];
+        uint16_t bound_clusters[MAX_CLUSTERS_PER_EP] = {0};
+        uint8_t bound_cluster_count = 0;
 
         for (size_t t = 0; t < REPORT_TABLE_COUNT; t++) {
             const report_cfg_entry_t *cfg = &k_report_table[t];
@@ -276,6 +373,29 @@ size_t rc_configure_device(device_record_t *dev)
                 }
             }
             if (!has_cluster) continue;
+
+            if (!report_cfg_applies_to_device(dev, cfg)) {
+                ZB_LOG("REPORT_CFG skip %s ep=%u cluster=%s attr=0x%04X "
+                       "power_source=%s",
+                       dm_display_name(dev), ep->endpoint_id,
+                       utils_cluster_name(cfg->cluster_id), cfg->attr_id,
+                       utils_power_source_name(dev->power_source));
+                continue;
+            }
+
+            bool bind_seen_this_pass = false;
+            for (uint8_t b = 0; b < bound_cluster_count; b++) {
+                if (bound_clusters[b] == cfg->cluster_id) {
+                    bind_seen_this_pass = true;
+                    break;
+                }
+            }
+            if (!bind_seen_this_pass) {
+                bind_report_cluster_to_coord(dev, ep, cfg->cluster_id, coord_ieee);
+                if (bound_cluster_count < MAX_CLUSTERS_PER_EP) {
+                    bound_clusters[bound_cluster_count++] = cfg->cluster_id;
+                }
+            }
 
             // For IAS Zone, write CIE address first
             if (cfg->cluster_id == 0x0500 && cfg->attr_id == 0x0002) {
@@ -299,8 +419,43 @@ size_t rc_configure_device(device_record_t *dev)
         dev->reporting_configured = reporting_configured;
         dev->dirty = true;
     }
+    if (reporting_configured && dev->state == DEV_STATE_INTERVIEWED) {
+        dev->state = DEV_STATE_CONFIGURED;
+    }
 
     return (size_t)configured_count;
+}
+
+bool rc_device_has_reporting_pending(const device_record_t *dev)
+{
+    if (!dev || !dev->in_use || !dev->is_sleepy) {
+        return false;
+    }
+    if (dev->state < DEV_STATE_INTERVIEWED) {
+        return false;
+    }
+
+    return !dev->reporting_configured || dev->report_cfg_in_progress;
+}
+
+bool rc_configure_pending_sleepy_now(device_record_t *dev, const char *reason)
+{
+    if (!rc_device_has_reporting_pending(dev)) {
+        return false;
+    }
+    if (dev->report_cfg_in_progress) {
+        ZB_LOG("REPORT_CFG sleepy window for %s reason=%s already in progress "
+               "(responses=%u/%u failed=%u)",
+               dm_display_name(dev), reason ? reason : "?",
+               dev->report_cfg_received, dev->report_cfg_expected,
+               dev->report_cfg_failed);
+        return false;
+    }
+
+    ZB_LOG("REPORT_CFG sleepy window for %s reason=%s: configuring pending "
+           "reporting",
+           dm_display_name(dev), reason ? reason : "?");
+    return rc_configure_device(dev) > 0;
 }
 
 void rc_configure_device_async(device_record_t *dev)
@@ -403,6 +558,11 @@ void rc_on_config_resp(const esp_zb_zcl_cmd_config_report_resp_message_t *msg)
             if (dev->reporting_configured != reporting_configured) {
                 dev->reporting_configured = reporting_configured;
                 dev->dirty = true;
+            }
+            if (reporting_configured && dev->state == DEV_STATE_INTERVIEWED) {
+                dev->state = DEV_STATE_CONFIGURED;
+            } else if (!reporting_configured && dev->state == DEV_STATE_CONFIGURED) {
+                dev->state = DEV_STATE_INTERVIEWED;
             }
         }
     }

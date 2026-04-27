@@ -56,6 +56,9 @@ const char *utils_device_type_name(uint16_t device_id);
 /** Short name for a power_source value (Basic cluster 0x0007). */
 const char *utils_power_source_name(uint8_t power_source);
 
+/** True when Basic power_source is unknown or battery-backed. */
+bool utils_power_source_may_have_battery(uint8_t power_source);
+
 /** Short name for a device_state enum value. */
 const char *utils_device_state_name(int state);
 

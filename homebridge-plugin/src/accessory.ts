@@ -11,6 +11,7 @@ import {
   deviceKey,
   normalizeInventoryDevice,
   normalizeStateSnapshot,
+  supportsBatteryService,
   supportsCapability,
 } from './model';
 
@@ -212,7 +213,7 @@ export class ZigbeeDeviceAccessory {
   }
 
   private configureBatteryService(): void {
-    const shouldExposeBattery = supportsCapability(this.device, 'battery_sensor') && this.hasPrimaryService();
+    const shouldExposeBattery = supportsBatteryService(this.device) && this.hasPrimaryService();
     if (!shouldExposeBattery) {
       this.removeServiceIfPresent(this.platform.Service.Battery.UUID, SERVICE_IDS.battery);
       return;
@@ -260,7 +261,7 @@ export class ZigbeeDeviceAccessory {
     if (supportsCapability(this.device, 'ias_zone_sensor')) {
       desired.add(`${this.platform.Service.ContactSensor.UUID}:${SERVICE_IDS.contact}`);
     }
-    if (supportsCapability(this.device, 'battery_sensor') && this.hasPrimaryService()) {
+    if (supportsBatteryService(this.device) && this.hasPrimaryService()) {
       desired.add(`${this.platform.Service.Battery.UUID}:${SERVICE_IDS.battery}`);
     }
 
