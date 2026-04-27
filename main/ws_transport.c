@@ -1828,6 +1828,8 @@ static const char *web_report_cfg_reason(uint8_t result)
             return "bind_fail";
         case REPORT_CFG_RESULT_WRITE_FAIL:
             return "write_fail";
+        case REPORT_CFG_RESULT_UNSUPPORTED:
+            return "unsupported";
         default:
             return "unknown";
     }
@@ -1845,7 +1847,8 @@ static void web_json_stream_reporting_failures(web_json_stream_t *s,
             if (record->result != REPORT_CFG_RESULT_FAIL &&
                 record->result != REPORT_CFG_RESULT_MISSING &&
                 record->result != REPORT_CFG_RESULT_BIND_FAIL &&
-                record->result != REPORT_CFG_RESULT_WRITE_FAIL) {
+                record->result != REPORT_CFG_RESULT_WRITE_FAIL &&
+                record->result != REPORT_CFG_RESULT_UNSUPPORTED) {
                 continue;
             }
             if (!first) {

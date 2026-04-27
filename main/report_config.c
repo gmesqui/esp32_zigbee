@@ -695,13 +695,19 @@ void rc_on_config_resp(const esp_zb_zcl_cmd_config_report_resp_message_t *msg)
     while (var) {
         has_variables = true;
         if (var->status != ESP_ZB_ZCL_STATUS_SUCCESS) {
-            ZB_LOG("REPORT_CFG_RSP %s ep=%u cluster=%s attr=0x%04X FAIL status=0x%02X",
+            bool is_unsupported = (var->status == ESP_ZB_ZCL_STATUS_UNSUP_ATTRIB);
+            ZB_LOG("REPORT_CFG_RSP %s ep=%u cluster=%s attr=0x%04X %s status=0x%02X",
                    name, msg->info.src_endpoint, utils_cluster_name(msg->info.cluster),
-                   var->attribute_id, (unsigned)var->status);
-            any_fail = true;
+                   var->attribute_id, is_unsupported ? "UNSUPPORTED" : "FAIL",
+                   (unsigned)var->status);
+            if (!is_unsupported) {
+                any_fail = true;
+            }
             report_cfg_records_mark(dev, msg->info.src_endpoint,
                                     msg->info.cluster, var->attribute_id, true,
-                                    var->status, REPORT_CFG_RESULT_FAIL);
+                                    var->status,
+                                    is_unsupported ? REPORT_CFG_RESULT_UNSUPPORTED
+                                                   : REPORT_CFG_RESULT_FAIL);
         } else {
             report_cfg_records_mark(dev, msg->info.src_endpoint,
                                     msg->info.cluster, var->attribute_id, true,

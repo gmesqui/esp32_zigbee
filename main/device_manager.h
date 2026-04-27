@@ -30,6 +30,7 @@ typedef enum {
     REPORT_CFG_RESULT_MISSING = 3,
     REPORT_CFG_RESULT_BIND_FAIL = 4,
     REPORT_CFG_RESULT_WRITE_FAIL = 5,
+    REPORT_CFG_RESULT_UNSUPPORTED = 6,
 } report_cfg_result_t;
 
 typedef struct {
