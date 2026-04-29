@@ -747,15 +747,27 @@ void esp_zb_app_signal_handler(esp_zb_app_signal_t *signal_struct)
                 bool fresh_sleepy = false;
                 if (dev->is_sleepy && dev->last_seen_ms != 0) {
                     uint32_t age_ms = utils_uptime_ms() - dev->last_seen_ms;
-                    fresh_sleepy = age_ms <= rc_presence_timeout_ms(true);
+                    fresh_sleepy = age_ms <= rc_presence_offline_timeout_ms(true);
                     if (fresh_sleepy) {
                         ZB_LOG("DEVICE %s unavailable ignored (sleepy, last_seen=%lu s ago)",
                                dm_display_name(dev),
                                (unsigned long)(age_ms / 1000u));
                     }
                 }
-                if (!fresh_sleepy && dm_set_online(dev, false)) {
-                    ZB_LOG("DEVICE %s OFFLINE (unavailable)", dm_display_name(dev));
+                if (!fresh_sleepy) {
+                    uint32_t age_ms = dev->last_seen_ms != 0
+                        ? utils_uptime_ms() - dev->last_seen_ms
+                        : 0xFFFFFFFFu;
+                    if (!dev->is_sleepy && dev->online &&
+                        age_ms <= rc_presence_offline_timeout_ms(false)) {
+                        if (dm_request_presence_probe(dev, "unavailable")) {
+                            ZB_LOG("DEVICE %s unavailable pending confirmation (last_seen=%lu s ago)",
+                                   dm_display_name(dev),
+                                   (unsigned long)(age_ms / 1000u));
+                        }
+                    } else if (dm_set_online(dev, false)) {
+                        ZB_LOG("DEVICE %s OFFLINE (unavailable)", dm_display_name(dev));
+                    }
                 }
             }
             dm_unlock();

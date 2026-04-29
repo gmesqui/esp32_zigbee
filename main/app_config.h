@@ -16,7 +16,8 @@
 #define APP_CONFIG_DEFAULT_TIMEZONE "UTC0"
 #define APP_CONFIG_DEFAULT_REPORT_ALWAYS_ON_MAX_S 300u
 #define APP_CONFIG_DEFAULT_REPORT_SLEEPY_MAX_S 3600u
-#define APP_CONFIG_DEFAULT_PRESENCE_GRACE_S 20u
+#define APP_CONFIG_DEFAULT_PRESENCE_PROBE_GRACE_S 20u
+#define APP_CONFIG_DEFAULT_PRESENCE_OFFLINE_GRACE_S 40u
 
 typedef struct {
     char mdns_hostname[APP_CONFIG_MDNS_HOSTNAME_LEN];
@@ -26,7 +27,8 @@ typedef struct {
     uint16_t permit_join_duration_s;
     uint16_t report_always_on_max_s;
     uint16_t report_sleepy_max_s;
-    uint16_t presence_grace_s;
+    uint16_t presence_probe_grace_s;
+    uint16_t presence_offline_grace_s;
 } app_config_t;
 
 /** Load application configuration from NVS, falling back to defaults. */
@@ -49,4 +51,5 @@ uint16_t app_config_clamp_permit_join_duration(uint32_t duration_s);
 
 uint16_t app_config_clamp_report_always_on_max(uint32_t seconds);
 uint16_t app_config_clamp_report_sleepy_max(uint32_t seconds);
-uint16_t app_config_clamp_presence_grace(uint32_t seconds);
+uint16_t app_config_clamp_presence_probe_grace(uint32_t seconds);
+uint16_t app_config_clamp_presence_offline_grace(uint32_t seconds);

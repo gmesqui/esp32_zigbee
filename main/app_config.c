@@ -18,6 +18,8 @@
 #define APP_CONFIG_KEY_REPORT_AON "rep_aon"
 #define APP_CONFIG_KEY_REPORT_SLEEPY "rep_slp"
 #define APP_CONFIG_KEY_PRES_GRACE "pres_gr"
+#define APP_CONFIG_KEY_PRES_PROBE_GRACE "pres_probe"
+#define APP_CONFIG_KEY_PRES_OFFLINE_GRACE "pres_off"
 
 #define APP_CONFIG_PERMIT_JOIN_MIN_S 10u
 #define APP_CONFIG_PERMIT_JOIN_MAX_S 254u
@@ -25,8 +27,11 @@
 #define APP_CONFIG_REPORT_ALWAYS_ON_MAX_S 3600u
 #define APP_CONFIG_REPORT_SLEEPY_MIN_S 300u
 #define APP_CONFIG_REPORT_SLEEPY_MAX_S 43200u
-#define APP_CONFIG_PRESENCE_GRACE_MIN_S 5u
-#define APP_CONFIG_PRESENCE_GRACE_MAX_S 3600u
+#define APP_CONFIG_PRESENCE_PROBE_GRACE_MIN_S 5u
+#define APP_CONFIG_PRESENCE_PROBE_GRACE_MAX_S 3600u
+#define APP_CONFIG_PRESENCE_OFFLINE_GRACE_MIN_S 10u
+#define APP_CONFIG_PRESENCE_OFFLINE_GRACE_MAX_S 7200u
+#define APP_CONFIG_PRESENCE_OFFLINE_EXTRA_MIN_S 10u
 
 static app_config_t s_config;
 static SemaphoreHandle_t s_config_lock;
@@ -49,7 +54,8 @@ void app_config_defaults(app_config_t *cfg)
     cfg->permit_join_duration_s = APP_CONFIG_DEFAULT_PERMIT_JOIN_DURATION_S;
     cfg->report_always_on_max_s = APP_CONFIG_DEFAULT_REPORT_ALWAYS_ON_MAX_S;
     cfg->report_sleepy_max_s = APP_CONFIG_DEFAULT_REPORT_SLEEPY_MAX_S;
-    cfg->presence_grace_s = APP_CONFIG_DEFAULT_PRESENCE_GRACE_S;
+    cfg->presence_probe_grace_s = APP_CONFIG_DEFAULT_PRESENCE_PROBE_GRACE_S;
+    cfg->presence_offline_grace_s = APP_CONFIG_DEFAULT_PRESENCE_OFFLINE_GRACE_S;
 }
 
 bool app_config_hostname_is_valid(const char *hostname)
@@ -108,15 +114,45 @@ uint16_t app_config_clamp_report_sleepy_max(uint32_t seconds)
     return (uint16_t)seconds;
 }
 
-uint16_t app_config_clamp_presence_grace(uint32_t seconds)
+uint16_t app_config_clamp_presence_probe_grace(uint32_t seconds)
 {
-    if (seconds < APP_CONFIG_PRESENCE_GRACE_MIN_S) {
-        return APP_CONFIG_PRESENCE_GRACE_MIN_S;
+    if (seconds < APP_CONFIG_PRESENCE_PROBE_GRACE_MIN_S) {
+        return APP_CONFIG_PRESENCE_PROBE_GRACE_MIN_S;
     }
-    if (seconds > APP_CONFIG_PRESENCE_GRACE_MAX_S) {
-        return APP_CONFIG_PRESENCE_GRACE_MAX_S;
+    if (seconds > APP_CONFIG_PRESENCE_PROBE_GRACE_MAX_S) {
+        return APP_CONFIG_PRESENCE_PROBE_GRACE_MAX_S;
     }
     return (uint16_t)seconds;
+}
+
+uint16_t app_config_clamp_presence_offline_grace(uint32_t seconds)
+{
+    if (seconds < APP_CONFIG_PRESENCE_OFFLINE_GRACE_MIN_S) {
+        return APP_CONFIG_PRESENCE_OFFLINE_GRACE_MIN_S;
+    }
+    if (seconds > APP_CONFIG_PRESENCE_OFFLINE_GRACE_MAX_S) {
+        return APP_CONFIG_PRESENCE_OFFLINE_GRACE_MAX_S;
+    }
+    return (uint16_t)seconds;
+}
+
+static void normalize_presence_graces(app_config_t *cfg)
+{
+    if (!cfg) {
+        return;
+    }
+
+    cfg->presence_probe_grace_s =
+        app_config_clamp_presence_probe_grace(cfg->presence_probe_grace_s);
+    cfg->presence_offline_grace_s =
+        app_config_clamp_presence_offline_grace(cfg->presence_offline_grace_s);
+
+    uint32_t min_offline =
+        (uint32_t)cfg->presence_probe_grace_s + APP_CONFIG_PRESENCE_OFFLINE_EXTRA_MIN_S;
+    if (cfg->presence_offline_grace_s < min_offline) {
+        cfg->presence_offline_grace_s =
+            app_config_clamp_presence_offline_grace(min_offline);
+    }
 }
 
 static void load_str(nvs_handle_t handle, const char *key, char *dst, size_t dst_len)
@@ -171,10 +207,23 @@ void app_config_init(void)
             app_config_clamp_report_sleepy_max(report_secs);
     }
     if (nvs_get_u16(handle, APP_CONFIG_KEY_PRES_GRACE, &report_secs) == ESP_OK) {
-        loaded.presence_grace_s =
-            app_config_clamp_presence_grace(report_secs);
+        loaded.presence_probe_grace_s =
+            app_config_clamp_presence_probe_grace(report_secs);
+        loaded.presence_offline_grace_s =
+            app_config_clamp_presence_offline_grace(
+                (uint32_t)loaded.presence_probe_grace_s +
+                APP_CONFIG_PRESENCE_OFFLINE_EXTRA_MIN_S * 2u);
+    }
+    if (nvs_get_u16(handle, APP_CONFIG_KEY_PRES_PROBE_GRACE, &report_secs) == ESP_OK) {
+        loaded.presence_probe_grace_s =
+            app_config_clamp_presence_probe_grace(report_secs);
+    }
+    if (nvs_get_u16(handle, APP_CONFIG_KEY_PRES_OFFLINE_GRACE, &report_secs) == ESP_OK) {
+        loaded.presence_offline_grace_s =
+            app_config_clamp_presence_offline_grace(report_secs);
     }
     nvs_close(handle);
+    normalize_presence_graces(&loaded);
 
     if (!app_config_hostname_is_valid(loaded.mdns_hostname)) {
         strncpy(loaded.mdns_hostname, APP_CONFIG_DEFAULT_MDNS_HOSTNAME,
@@ -240,8 +289,7 @@ esp_err_t app_config_save(const app_config_t *cfg)
         app_config_clamp_report_always_on_max(next.report_always_on_max_s);
     next.report_sleepy_max_s =
         app_config_clamp_report_sleepy_max(next.report_sleepy_max_s);
-    next.presence_grace_s =
-        app_config_clamp_presence_grace(next.presence_grace_s);
+    normalize_presence_graces(&next);
 
     nvs_handle_t handle;
     esp_err_t err = nvs_open(APP_CONFIG_NAMESPACE, NVS_READWRITE, &handle);
@@ -277,7 +325,15 @@ esp_err_t app_config_save(const app_config_t *cfg)
     }
     if (err == ESP_OK) {
         err = nvs_set_u16(handle, APP_CONFIG_KEY_PRES_GRACE,
-                          next.presence_grace_s);
+                          next.presence_probe_grace_s);
+    }
+    if (err == ESP_OK) {
+        err = nvs_set_u16(handle, APP_CONFIG_KEY_PRES_PROBE_GRACE,
+                          next.presence_probe_grace_s);
+    }
+    if (err == ESP_OK) {
+        err = nvs_set_u16(handle, APP_CONFIG_KEY_PRES_OFFLINE_GRACE,
+                          next.presence_offline_grace_s);
     }
     if (err == ESP_OK) {
         err = nvs_commit(handle);

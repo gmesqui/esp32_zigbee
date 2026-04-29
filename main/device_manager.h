@@ -121,6 +121,11 @@ typedef struct {
     uint32_t  read_rsp_fail;
     uint32_t  interview_attempts;
     uint32_t  last_probe_ms;
+    uint32_t  presence_probe_sent_ms;
+    uint32_t  presence_probe_last_seen_ms;
+    uint8_t   presence_probe_endpoint;
+    uint16_t  presence_probe_cluster_id;
+    uint16_t  presence_probe_attr_id;
     bool      binding_refresh_active;
     uint16_t  slot_generation;
 
@@ -179,6 +184,9 @@ void dm_touch(device_record_t *dev, uint8_t lqi, int8_t rssi);
 
 /** Change online/offline state and emit availability event on transition. */
 bool dm_set_online(device_record_t *dev, bool online);
+
+/** Send a low-cost presence confirmation read for an always-on device. */
+bool dm_request_presence_probe(device_record_t *dev, const char *reason);
 
 /** Set friendly name. Truncated to FRIENDLY_NAME_LEN-1 chars. Marks dirty. */
 void dm_set_friendly_name(device_record_t *dev, const char *name);

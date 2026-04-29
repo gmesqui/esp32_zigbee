@@ -283,7 +283,11 @@ Se marca online cuando ocurre alguno de estos hechos:
 Se marca offline inmediatamente cuando ocurre:
 
 - `LEAVE_INDICATION` sin rejoin
-- `DEVICE_UNAVAILABLE`
+
+`DEVICE_UNAVAILABLE` ya no fuerza offline inmediato para always-on si el dispositivo
+esta dentro de la ventana de confirmacion: se envia una lectura de presencia y se
+espera al umbral alto antes de certificar offline. En sleepy se mantiene la logica
+conservadora basada en `last_seen_ms`.
 
 ### 2. Timeout de presencia periodico
 
@@ -292,16 +296,18 @@ Cada `10 s`, `maintenance_alarm()` ejecuta:
 - `nvs_cache_save_dirty()`
 - `dm_check_presence()`
 
-`dm_check_presence()` usa umbrales fijos:
+`dm_check_presence()` usa dos umbrales para dispositivos always-on:
 
-- always-on: `320 s`
-- sleepy: `3620 s`
+- `presence_probe_timeout = max_interval_reporting_efectivo + presence_probe_grace_s`
+- `presence_offline_timeout = max_interval_reporting_efectivo + presence_offline_grace_s`
 
-La regla es:
+La regla para always-on es:
 
-- `presence_timeout = max_interval_reporting_efectivo + 20 s`
+- al superar el primer umbral se envia una lectura ZCL de confirmacion
+- si llega cualquier trafico, `dm_touch()` refresca `last_seen_ms` y limpia la sospecha
+- al superar el segundo umbral con la misma marca `last_seen_ms`, se marca offline
 
-Si se supera ese tiempo desde `last_seen_ms`, se marca offline por inactividad.
+Los sleepy no se sondean activamente; se marcan offline al superar el umbral alto.
 
 ### Importante
 
@@ -1027,8 +1033,9 @@ Esto desacopla la logica Zigbee del transporte de publicacion.
 ## Tiempos y valores importantes
 
 - mantenimiento periodico: `10 s`
-- timeout de presencia always-on: `320 s`
-- timeout de presencia sleepy: `3620 s`
+- timeout de probe always-on por defecto: `320 s`
+- timeout offline always-on por defecto: `340 s`
+- timeout offline sleepy por defecto: `3640 s`
 - arranque del siguiente paso de entrevista: tipicamente `200 ms`
 - espera tras `READ_BASIC`: `1500 ms`
 - espera tras `READ_POWER_CFG`: `1000 ms`

@@ -6,6 +6,8 @@
 #include <stdio.h>
 #include "freertos/FreeRTOS.h"
 #include "freertos/semphr.h"
+#include "esp_zigbee_core.h"
+#include "zcl/esp_zigbee_zcl_command.h"
 
 // ---------------------------------------------------------------------------
 // Global device table — static allocation
@@ -14,6 +16,8 @@
 static device_record_t g_devices[MAX_DEVICES];
 static uint8_t         g_count = 0;
 static SemaphoreHandle_t g_mutex = NULL;
+
+static void dm_clear_presence_probe(device_record_t *dev);
 
 static void dm_emit_availability(const device_record_t *dev)
 {
@@ -178,6 +182,7 @@ void dm_touch(device_record_t *dev, uint8_t lqi, int8_t rssi)
 {
     if (!dev) return;
     dev->last_seen_ms = utils_uptime_ms();
+    dm_clear_presence_probe(dev);
     if (!(lqi == 0 && rssi == 0)) {
         dev->last_lqi  = lqi;
         dev->last_rssi = rssi;
@@ -199,6 +204,9 @@ bool dm_set_online(device_record_t *dev, bool online)
     if (dev->online == online) return false;
 
     dev->online = online;
+    if (!online) {
+        dm_clear_presence_probe(dev);
+    }
     ZB_LOG("DEVICE %s %s", dm_display_name(dev), online ? "ONLINE" : "OFFLINE");
     dm_emit_availability(dev);
     return true;
@@ -270,6 +278,103 @@ uint16_t dm_slot_generation(uint8_t idx)
 // Presence check
 // ---------------------------------------------------------------------------
 
+typedef struct {
+    uint16_t cluster_id;
+    uint16_t attr_id;
+} presence_probe_attr_t;
+
+static const presence_probe_attr_t k_presence_probe_attrs[] = {
+    { 0x0000, 0x0000 }, // Basic: ZCLVersion
+    { 0x0006, 0x0000 }, // On/Off
+    { 0x0008, 0x0000 }, // CurrentLevel
+    { 0x0402, 0x0000 }, // Temperature
+    { 0x0405, 0x0000 }, // Humidity
+    { 0x0403, 0x0000 }, // Pressure
+    { 0x0400, 0x0000 }, // Illuminance
+    { 0x0406, 0x0000 }, // Occupancy
+    { 0x0500, 0x0002 }, // IAS ZoneStatus
+    { 0x0B04, 0x050B }, // ElectricalMeasurement ActivePower
+    { 0x0001, 0x0021 }, // BatteryPercentageRemaining
+};
+
+static bool dm_select_presence_probe_attr(const device_record_t *dev,
+                                          uint8_t *endpoint,
+                                          uint16_t *cluster_id,
+                                          uint16_t *attr_id)
+{
+    if (!dev || !endpoint || !cluster_id || !attr_id) {
+        return false;
+    }
+
+    for (size_t i = 0; i < sizeof(k_presence_probe_attrs) / sizeof(k_presence_probe_attrs[0]); i++) {
+        uint8_t ep = 0;
+        if (dm_has_in_cluster(dev, k_presence_probe_attrs[i].cluster_id, &ep)) {
+            *endpoint = ep;
+            *cluster_id = k_presence_probe_attrs[i].cluster_id;
+            *attr_id = k_presence_probe_attrs[i].attr_id;
+            return true;
+        }
+    }
+
+    if (dev->endpoint_count > 0 && dev->endpoints[0].endpoint_id != 0) {
+        const endpoint_record_t *ep = &dev->endpoints[0];
+        *endpoint = ep->endpoint_id;
+        *cluster_id = 0x0000;
+        *attr_id = 0x0000;
+        return true;
+    }
+
+    return false;
+}
+
+bool dm_request_presence_probe(device_record_t *dev, const char *reason)
+{
+    if (!dev || !dev->in_use || dev->is_sleepy || !dev->online) {
+        return false;
+    }
+
+    uint32_t now = utils_uptime_ms();
+    if (dev->presence_probe_sent_ms != 0 &&
+        dev->presence_probe_last_seen_ms == dev->last_seen_ms) {
+        return true;
+    }
+
+    uint8_t endpoint = 0;
+    uint16_t cluster_id = 0;
+    uint16_t attr_id = 0;
+    if (!dm_select_presence_probe_attr(dev, &endpoint, &cluster_id, &attr_id)) {
+        ZB_LOG("PRESENCE probe skip %s reason=%s: no readable endpoint",
+               dm_display_name(dev), reason ? reason : "?");
+        return false;
+    }
+
+    uint16_t attr = attr_id;
+    esp_zb_zcl_read_attr_cmd_t cmd = {
+        .zcl_basic_cmd = {
+            .src_endpoint = COORD_ENDPOINT,
+            .dst_addr_u.addr_short = dev->nwk_addr,
+            .dst_endpoint = endpoint,
+        },
+        .address_mode = ESP_ZB_APS_ADDR_MODE_16_ENDP_PRESENT,
+        .clusterID = cluster_id,
+        .attr_number = 1,
+        .attr_field = &attr,
+    };
+
+    dev->presence_probe_sent_ms = now;
+    dev->presence_probe_last_seen_ms = dev->last_seen_ms;
+    dev->presence_probe_endpoint = endpoint;
+    dev->presence_probe_cluster_id = cluster_id;
+    dev->presence_probe_attr_id = attr_id;
+
+    ZB_LOG("PRESENCE probe %s reason=%s age=%lu s dst=0x%04X ep=%u cluster=%s attr=0x%04X",
+           dm_display_name(dev), reason ? reason : "?",
+           (unsigned long)((now - dev->last_seen_ms) / 1000u),
+           dev->nwk_addr, endpoint, utils_cluster_name(cluster_id), attr_id);
+    esp_zb_zcl_read_attr_cmd_req(&cmd);
+    return true;
+}
+
 void dm_check_presence(void)
 {
     uint32_t now = utils_uptime_ms();
@@ -278,13 +383,36 @@ void dm_check_presence(void)
         if (!d->in_use || !d->online) continue;
         if (d->last_seen_ms == 0) continue;
 
-        uint32_t threshold = rc_presence_timeout_ms(d->is_sleepy);
+        uint32_t offline_threshold = rc_presence_offline_timeout_ms(d->is_sleepy);
+        uint32_t age_ms = now - d->last_seen_ms;
 
-        if ((now - d->last_seen_ms) > threshold) {
-            d->online = false;
-            uint32_t secs = (now - d->last_seen_ms) / 1000u;
-            ZB_LOG("DEVICE %s OFFLINE (no contact %lu s)", dm_display_name(d), (unsigned long)secs);
-            dm_emit_availability(d);
+        if (d->is_sleepy) {
+            if (age_ms <= offline_threshold) {
+                continue;
+            }
+        } else if (age_ms > offline_threshold &&
+                   d->presence_probe_sent_ms != 0 &&
+                   d->presence_probe_last_seen_ms == d->last_seen_ms) {
+            /* fall through to offline certification */
+        } else {
+            if (age_ms > rc_presence_probe_timeout_ms(false)) {
+                if (!dm_request_presence_probe(d, "timeout") &&
+                    age_ms > offline_threshold) {
+                    /* No safe read route exists; certify by timeout. */
+                } else {
+                    continue;
+                }
+            } else {
+                continue;
+            }
+        }
+
+        if (age_ms > offline_threshold) {
+            uint32_t secs = age_ms / 1000u;
+            if (dm_set_online(d, false)) {
+                ZB_LOG("DEVICE %s OFFLINE (no contact %lu s)", dm_display_name(d),
+                       (unsigned long)secs);
+            }
         }
     }
 }
@@ -320,6 +448,18 @@ bool dm_has_in_cluster(const device_record_t *dev, uint16_t cluster_id,
         }
     }
     return false;
+}
+
+static void dm_clear_presence_probe(device_record_t *dev)
+{
+    if (!dev) {
+        return;
+    }
+    dev->presence_probe_sent_ms = 0;
+    dev->presence_probe_last_seen_ms = 0;
+    dev->presence_probe_endpoint = 0;
+    dev->presence_probe_cluster_id = 0;
+    dev->presence_probe_attr_id = 0;
 }
 
 bool dm_has_complete_descriptors(const device_record_t *dev)

@@ -41,7 +41,13 @@ void rc_mark_reporting_timeout(device_record_t *dev);
 /** Effective max_interval policy applied by the coordinator for reporting. */
 uint16_t rc_effective_max_interval(bool is_sleepy);
 
-/** Presence timeout derived from reporting max_interval plus a safety margin. */
+/** Presence probe timeout derived from reporting max_interval plus a low margin. */
+uint32_t rc_presence_probe_timeout_ms(bool is_sleepy);
+
+/** Presence offline timeout derived from reporting max_interval plus a high margin. */
+uint32_t rc_presence_offline_timeout_ms(bool is_sleepy);
+
+/** Legacy presence timeout name; returns the offline-certification timeout. */
 uint32_t rc_presence_timeout_ms(bool is_sleepy);
 
 typedef struct {

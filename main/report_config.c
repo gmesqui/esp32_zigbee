@@ -77,12 +77,25 @@ uint16_t rc_effective_max_interval(bool is_sleepy)
                      : cfg.report_always_on_max_s;
 }
 
-uint32_t rc_presence_timeout_ms(bool is_sleepy)
+uint32_t rc_presence_probe_timeout_ms(bool is_sleepy)
 {
     app_config_t cfg;
     app_config_get(&cfg);
     uint32_t max_interval_s = rc_effective_max_interval(is_sleepy);
-    return (max_interval_s + cfg.presence_grace_s) * 1000u;
+    return (max_interval_s + cfg.presence_probe_grace_s) * 1000u;
+}
+
+uint32_t rc_presence_offline_timeout_ms(bool is_sleepy)
+{
+    app_config_t cfg;
+    app_config_get(&cfg);
+    uint32_t max_interval_s = rc_effective_max_interval(is_sleepy);
+    return (max_interval_s + cfg.presence_offline_grace_s) * 1000u;
+}
+
+uint32_t rc_presence_timeout_ms(bool is_sleepy)
+{
+    return rc_presence_offline_timeout_ms(is_sleepy);
 }
 
 static void rc_configure_device_alarm(uint8_t dev_idx)

@@ -151,9 +151,10 @@ app_main()
 
 ### Deteccion de presencia (offline)
 
-- **Siempre encendido**: timeout 7260 s (~2 h) = 2 × max_interval + margen
-- **Sleepy (bateria)**: timeout 10920 s (~3 h) = 3 × max_interval + margen
+- **Siempre encendido**: lectura de confirmacion al llegar a `max_interval + presence_probe_grace_s`; offline al llegar a `max_interval + presence_offline_grace_s` si no hubo respuesta.
+- **Sleepy (bateria)**: sin sondeo activo; offline al llegar a `max_interval + presence_offline_grace_s`.
 - Verificacion cada 10 s via alarma de mantenimiento
+- Para dispositivos siempre encendidos, `presence_probe_grace_s` es el margen bajo que dispara una lectura ZCL de confirmacion; `presence_offline_grace_s` es el margen alto que certifica offline si no hubo respuesta ni otro trafico.
 
 ### Persistencia NVS de dispositivos
 

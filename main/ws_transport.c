@@ -831,7 +831,8 @@ static const char s_web_index_html[] =
 "</div><h2>Reporting</h2><div class=\"grid\">"
 "<label>Max always-on (s)<input id=\"report_always_on_max_s\" type=\"number\" min=\"30\" max=\"3600\"></label>"
 "<label>Max sleepy (s)<input id=\"report_sleepy_max_s\" type=\"number\" min=\"300\" max=\"43200\"></label>"
-"<label>Margen presencia (s)<input id=\"presence_grace_s\" type=\"number\" min=\"5\" max=\"3600\"></label>"
+"<label>Margen probe (s)<input id=\"presence_probe_grace_s\" type=\"number\" min=\"5\" max=\"3600\"></label>"
+"<label>Margen offline (s)<input id=\"presence_offline_grace_s\" type=\"number\" min=\"10\" max=\"7200\"></label>"
 "</div><div class=\"actions\"><button id=\"save\">Guardar</button><button class=\"secondary\" id=\"refresh\">Actualizar</button></div><div class=\"msg\" id=\"msg\"></div></section>"
 "<section class=\"page\" id=\"page-actions\"><h2>Join</h2><div class=\"actions\"><button id=\"joinOpen\">Abrir join</button><button class=\"warn\" id=\"joinClose\">Cerrar join</button></div><h2>Acciones</h2><div class=\"actions\"><button class=\"secondary\" id=\"timeResync\">Sincronizar hora</button><button class=\"secondary\" id=\"configureAll\">Reconfigurar reporting en todos</button><button class=\"secondary\" id=\"closeWs\">Cerrar WebSocket</button><button class=\"warn\" id=\"eraseCache\">Borrar cache dispositivos</button><button class=\"warn\" id=\"reboot\">Reiniciar</button><button class=\"warn\" id=\"zbReset\">Reset red Zigbee</button></div></section>"
 "<section class=\"page\" id=\"page-devices\"><h2>Dispositivos</h2><div class=\"toolbar\"><label>Buscar<input id=\"deviceSearch\" placeholder=\"nombre, IEEE o modelo\"></label><label>Filtro<select id=\"deviceFilter\"><option value=\"all\">Todos</option><option value=\"online\">Online</option><option value=\"offline\">Offline</option><option value=\"sleepy\">Sleepy</option><option value=\"router\">Routers / always-on</option><option value=\"reporting\">Reporting pendiente</option></select></label></div><table><thead><tr><th>Nombre</th><th>IEEE</th><th>Estado</th><th>Lecturas</th><th>Modelo</th><th>Acciones</th></tr></thead><tbody id=\"devices\"></tbody></table></section>"
@@ -841,7 +842,7 @@ static const char s_web_index_html[] =
 "<section class=\"page\" id=\"page-events\"><h2>Eventos recientes</h2><div class=\"events\" id=\"events\"></div></section>"
 "</main><script>"
 "let cfg={},lastStatus=null,autoRefresh=true,configDirty=false;"
-"const CONFIG_FIELD_IDS=['mdns_hostname','mdns_instance','ntp_server','timezone','permit_join_duration_s','report_always_on_max_s','report_sleepy_max_s','presence_grace_s'];"
+"const CONFIG_FIELD_IDS=['mdns_hostname','mdns_instance','ntp_server','timezone','permit_join_duration_s','report_always_on_max_s','report_sleepy_max_s','presence_probe_grace_s','presence_offline_grace_s'];"
 "const TZ_OPTIONS=["
 "{v:'UTC12',l:'UTC-12:00 - fija'},{v:'UTC11',l:'UTC-11:00 - fija'},{v:'HST10',l:'UTC-10:00 - Hawai (HST)'},{v:'UTC9:30',l:'UTC-09:30 - fija'},{v:'AKST9AKDT,M3.2.0,M11.1.0',l:'UTC-09:00 / -08:00 - Alaska'},{v:'PST8PDT,M3.2.0,M11.1.0',l:'UTC-08:00 / -07:00 - Pacifico'},{v:'MST7MDT,M3.2.0,M11.1.0',l:'UTC-07:00 / -06:00 - Montana'},{v:'MST7',l:'UTC-07:00 - Arizona/MST fija'},{v:'CST6CDT,M3.2.0,M11.1.0',l:'UTC-06:00 / -05:00 - Central US'},{v:'EST5EDT,M3.2.0,M11.1.0',l:'UTC-05:00 / -04:00 - Este US'},{v:'EST5',l:'UTC-05:00 - EST fija'},{v:'UTC4',l:'UTC-04:00 - fija'},{v:'UTC3:30',l:'UTC-03:30 - fija'},{v:'UTC3',l:'UTC-03:00 - fija'},{v:'UTC2',l:'UTC-02:00 - fija'},{v:'UTC1',l:'UTC-01:00 - fija'},"
 "{v:'UTC0',l:'UTC+00:00 - UTC/GMT'},{v:'GMT0BST,M3.5.0/1,M10.5.0',l:'UTC+00:00 / +01:00 - Reino Unido'},{v:'WET0WEST,M3.5.0/1,M10.5.0',l:'UTC+00:00 / +01:00 - Europa oeste'},"
@@ -862,7 +863,7 @@ static const char s_web_index_html[] =
 "function deviceById(id){id=String(id||'').toLowerCase();return (lastStatus&&lastStatus.devices||[]).find(d=>String(d.ieee).toLowerCase()===id)}"
 "function editingDeviceName(){let el=document.activeElement;return el&&el.tagName==='INPUT'&&(el.id==='deviceName'||el.id.indexOf('name_')===0)}"
 "function setupConfigDirty(){CONFIG_FIELD_IDS.forEach(id=>{let el=document.getElementById(id);if(!el)return;el.addEventListener('input',()=>configDirty=true);el.addEventListener('change',()=>configDirty=true)})}"
-"function fillConfigForm(force){if(!cfg||(!force&&configDirty))return;document.getElementById('mdns_hostname').value=cfg.mdns_hostname;document.getElementById('mdns_instance').value=cfg.mdns_instance;document.getElementById('ntp_server').value=cfg.ntp_server;ensureTimezoneOption(cfg.timezone);document.getElementById('timezone').value=cfg.timezone;document.getElementById('permit_join_duration_s').value=cfg.permit_join_duration_s;document.getElementById('report_always_on_max_s').value=cfg.report_always_on_max_s;document.getElementById('report_sleepy_max_s').value=cfg.report_sleepy_max_s;document.getElementById('presence_grace_s').value=cfg.presence_grace_s;configDirty=false}"
+"function fillConfigForm(force){if(!cfg||(!force&&configDirty))return;document.getElementById('mdns_hostname').value=cfg.mdns_hostname;document.getElementById('mdns_instance').value=cfg.mdns_instance;document.getElementById('ntp_server').value=cfg.ntp_server;ensureTimezoneOption(cfg.timezone);document.getElementById('timezone').value=cfg.timezone;document.getElementById('permit_join_duration_s').value=cfg.permit_join_duration_s;document.getElementById('report_always_on_max_s').value=cfg.report_always_on_max_s;document.getElementById('report_sleepy_max_s').value=cfg.report_sleepy_max_s;document.getElementById('presence_probe_grace_s').value=cfg.presence_probe_grace_s;document.getElementById('presence_offline_grace_s').value=cfg.presence_offline_grace_s;configDirty=false}"
 "function attrRows(d){let r=d.readings||{};let rows=Object.keys(r).map(k=>{let x=r[k];return `<tr><td>${esc(k)}</td><td>${esc(x.value)}${x.unit?' '+esc(x.unit):''}</td><td>${x.endpoint||'-'}</td><td>${hex(x.cluster_id)}</td><td>${hex(x.attr_id)}</td><td>${ago(x.ts||0)}</td></tr>`}).join('');let raw=(d.attrs||[]).map(a=>`<tr><td>raw</td><td>${esc(a.raw)}</td><td>${a.endpoint}</td><td>${hex(a.cluster_id)}</td><td>${hex(a.attr_id)} / t ${hex(a.attr_type)}</td><td>${ago(a.ts||0)}</td></tr>`).join('');return rows+raw}"
 "function endpointRows(d){return (d.endpoints||[]).map(e=>`<tr><td>${e.id}</td><td>${hex(e.profile_id)}</td><td>${hex(e.device_id)}<br>${esc(e.device_type)}</td><td>${clusters(e.in_clusters)}</td><td>${clusters(e.out_clusters)}</td></tr>`).join('')}"
 "function renderDevices(){let s=lastStatus;if(!s||editingDeviceName())return;let q=document.getElementById('deviceSearch').value.toLowerCase();let f=document.getElementById('deviceFilter').value;let rows=s.devices.filter(d=>passFilter(d,q,f)).map((d,i)=>`<tr><td><a href=\"/device?id=${encodeURIComponent(d.ieee)}\">${esc(d.name)}</a>${detail(d)}</td><td>${esc(d.ieee)}</td><td class=\"${d.online?'ok':'bad'}\">${d.online?'online':'offline'} / ${esc(d.state)}<br>reporting: ${reportingLabel(d.reporting)}<br>${d.is_sleepy?'sleepy':'router'}</td><td>${readings(d)}</td><td>${esc(d.manufacturer||'-')} ${esc(d.model||'')}<br>${esc(d.power_source||'')}</td><td><div class=\"rename\"><input id=\"name_${i}\" value=\"${esc(d.name)}\"><button class=\"small\" onclick=\"renameDev('${d.ieee}',document.getElementById('name_${i}').value)\">Guardar</button></div><div class=\"actions\"><a class=\"small\" href=\"/device?id=${encodeURIComponent(d.ieee)}\">Abrir</a><button class=\"small secondary\" onclick=\"devAction('/api/device/reinterview','${d.ieee}')\">Re-entrevistar</button><button class=\"small secondary\" onclick=\"devAction('/api/device/configure','${d.ieee}')\">Reporting</button></div></td></tr>`).join('');document.getElementById('devices').innerHTML=rows||'<tr><td colspan=\"6\">Sin dispositivos</td></tr>'}"
@@ -901,7 +902,7 @@ static const char s_web_index_html[] =
 "metric('Reset',esc(s.system.reset_reason||'-'))"
 "].join('');"
 "renderConfigTime();renderDevices();renderEvents();renderSystem();renderNetwork();renderZigbee();renderDevicePage();}"
-"document.getElementById('save').onclick=async()=>{try{await j('/api/config',{method:'PUT',headers:{'Content-Type':'application/json'},body:JSON.stringify({mdns_hostname:mdns_hostname.value,mdns_instance:mdns_instance.value,ntp_server:ntp_server.value,timezone:timezone.value,permit_join_duration_s:+permit_join_duration_s.value,report_always_on_max_s:+report_always_on_max_s.value,report_sleepy_max_s:+report_sleepy_max_s.value,presence_grace_s:+presence_grace_s.value})});configDirty=false;setMsg('Configuracion guardada');await load(true);}catch(e){setMsg('Error: '+e.message)}};"
+"document.getElementById('save').onclick=async()=>{try{await j('/api/config',{method:'PUT',headers:{'Content-Type':'application/json'},body:JSON.stringify({mdns_hostname:mdns_hostname.value,mdns_instance:mdns_instance.value,ntp_server:ntp_server.value,timezone:timezone.value,permit_join_duration_s:+permit_join_duration_s.value,report_always_on_max_s:+report_always_on_max_s.value,report_sleepy_max_s:+report_sleepy_max_s.value,presence_probe_grace_s:+presence_probe_grace_s.value,presence_offline_grace_s:+presence_offline_grace_s.value})});configDirty=false;setMsg('Configuracion guardada');await load(true);}catch(e){setMsg('Error: '+e.message)}};"
 "document.getElementById('refresh').onclick=()=>{configDirty=false;load(true).catch(e=>setMsg('Error: '+e.message))};"
 "document.getElementById('autoRefresh').onclick=()=>{autoRefresh=!autoRefresh;document.getElementById('autoRefresh').textContent=autoRefresh?'Pausar auto-refresh':'Reanudar auto-refresh'};"
 "document.getElementById('exportJson').onclick=exportStatus;"
@@ -1151,8 +1152,10 @@ static void json_add_config(cJSON *root)
                             cfg.report_always_on_max_s);
     cJSON_AddNumberToObject(config, "report_sleepy_max_s",
                             cfg.report_sleepy_max_s);
-    cJSON_AddNumberToObject(config, "presence_grace_s",
-                            cfg.presence_grace_s);
+    cJSON_AddNumberToObject(config, "presence_probe_grace_s",
+                            cfg.presence_probe_grace_s);
+    cJSON_AddNumberToObject(config, "presence_offline_grace_s",
+                            cfg.presence_offline_grace_s);
 }
 
 static esp_err_t web_index_handler(httpd_req_t *req)
@@ -1192,8 +1195,10 @@ static esp_err_t web_put_config_handler(httpd_req_t *req)
                                                                "report_always_on_max_s");
     cJSON *report_sleepy = cJSON_GetObjectItemCaseSensitive(body,
                                                             "report_sleepy_max_s");
-    cJSON *presence_grace = cJSON_GetObjectItemCaseSensitive(body,
-                                                             "presence_grace_s");
+    cJSON *presence_probe_grace = cJSON_GetObjectItemCaseSensitive(body,
+                                                                   "presence_probe_grace_s");
+    cJSON *presence_offline_grace = cJSON_GetObjectItemCaseSensitive(body,
+                                                                     "presence_offline_grace_s");
 
     if (hostname) {
         if (!cJSON_IsString(hostname) || !hostname->valuestring ||
@@ -1277,15 +1282,25 @@ static esp_err_t web_put_config_handler(httpd_req_t *req)
         cfg.report_sleepy_max_s = app_config_clamp_report_sleepy_max(
             (uint32_t)report_sleepy->valuedouble);
     }
-    if (presence_grace) {
-        if (!cJSON_IsNumber(presence_grace)) {
+    if (presence_probe_grace) {
+        if (!cJSON_IsNumber(presence_probe_grace)) {
             cJSON_Delete(body);
             return web_send_error_json(req, HTTPD_400_BAD_REQUEST,
                                        "invalid_presence",
-                                       "Presence grace must be numeric");
+                                       "Presence probe grace must be numeric");
         }
-        cfg.presence_grace_s = app_config_clamp_presence_grace(
-            (uint32_t)presence_grace->valuedouble);
+        cfg.presence_probe_grace_s = app_config_clamp_presence_probe_grace(
+            (uint32_t)presence_probe_grace->valuedouble);
+    }
+    if (presence_offline_grace) {
+        if (!cJSON_IsNumber(presence_offline_grace)) {
+            cJSON_Delete(body);
+            return web_send_error_json(req, HTTPD_400_BAD_REQUEST,
+                                       "invalid_presence",
+                                       "Presence offline grace must be numeric");
+        }
+        cfg.presence_offline_grace_s = app_config_clamp_presence_offline_grace(
+            (uint32_t)presence_offline_grace->valuedouble);
     }
     cJSON_Delete(body);
 
@@ -1985,11 +2000,13 @@ static esp_err_t web_get_status_handler(httpd_req_t *req)
                            ",\"permit_join_duration_s\":%u,"
                            "\"report_always_on_max_s\":%lu,"
                            "\"report_sleepy_max_s\":%lu,"
-                           "\"presence_grace_s\":%lu}",
+                           "\"presence_probe_grace_s\":%lu,"
+                           "\"presence_offline_grace_s\":%lu}",
                            cfg.permit_join_duration_s,
                            (unsigned long)cfg.report_always_on_max_s,
                            (unsigned long)cfg.report_sleepy_max_s,
-                           (unsigned long)cfg.presence_grace_s);
+                           (unsigned long)cfg.presence_probe_grace_s,
+                           (unsigned long)cfg.presence_offline_grace_s);
 
     web_json_stream_printf(&out,
                            ",\"system\":{\"uptime_s\":%lu,\"free_heap\":%u,"

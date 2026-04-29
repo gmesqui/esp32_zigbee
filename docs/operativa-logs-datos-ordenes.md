@@ -148,6 +148,25 @@ Valores utiles para el SNZB-02D:
 
 `0001/0020` puede devolver unsupported en este modelo; no debe confundirse con fallo global del reporting.
 
+## Prueba de presencia always-on
+
+Para reproducir falsos offline en routers/always-on, bajar temporalmente los margenes:
+
+```powershell
+Invoke-RestMethod "http://$gw`:8080/api/config" -Method Put `
+  -ContentType "application/json" `
+  -Body (@{
+    presence_probe_grace_s = 5
+    presence_offline_grace_s = 20
+  } | ConvertTo-Json)
+```
+
+Buscar en logs:
+
+- `PRESENCE probe ... reason=timeout`
+- `RX READ_ATTR_RSP ...` si el dispositivo responde
+- `OFFLINE (no contact ...)` solo si no hubo respuesta antes del margen alto
+
 ## Checklist para repetir la prueba
 
 1. Arrancar captura TCP a fichero.
