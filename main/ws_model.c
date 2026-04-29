@@ -1,8 +1,10 @@
 #include "ws_model.h"
 
 #include "utils.h"
+#include "zcl_handler.h"
 #include <stdarg.h>
 #include <stdio.h>
+#include <stdlib.h>
 #include <string.h>
 
 void ws_json_append(char **p, char *end, const char *fmt, ...)
@@ -144,6 +146,14 @@ void ws_model_append_state_device(char **p, char *end,
                                   const device_record_t *dev)
 {
     uint32_t last_seen = dev->last_seen_ms / 1000u;
+    attr_cache_entry_t *attrs = calloc(MAX_ATTR_CACHE, sizeof(*attrs));
+    size_t attr_count = 0;
+
+    if (attrs) {
+        size_t total = zcl_get_cached_attrs(dev->ieee_addr, attrs,
+                                            MAX_ATTR_CACHE);
+        attr_count = total > MAX_ATTR_CACHE ? MAX_ATTR_CACHE : total;
+    }
 
     ws_json_append(p, end, "{");
     ws_json_append(p, end, "\"device_id\":");
@@ -154,8 +164,31 @@ void ws_model_append_state_device(char **p, char *end,
     if (dev->radio_metrics_valid) {
         ws_json_append(p, end, ",\"link_quality\":%u", dev->last_lqi);
     }
-    ws_json_append(p, end, "},\"state\":{}");
+    ws_json_append(p, end, "},\"state\":{");
+
+    bool first = true;
+    for (size_t i = 0; i < attr_count; i++) {
+        ws_attr_meta_t meta;
+        attr_cache_entry_t *attr = &attrs[i];
+
+        if (!ws_model_attr_meta(attr->cluster_id, attr->attr_id, &meta)) {
+            continue;
+        }
+        if (!first) {
+            ws_json_append(p, end, ",");
+        }
+        first = false;
+        ws_json_append_string(p, end, meta.name);
+        ws_json_append(p, end, ":");
+        ws_model_append_attr_value_object(p, end, attr->cluster_id,
+                                          attr->attr_id, attr->attr_type,
+                                          attr->value,
+                                          attr->last_update_ms / 1000u);
+    }
+
     ws_json_append(p, end, "}");
+    ws_json_append(p, end, "}");
+    free(attrs);
 }
 
 bool ws_model_attr_meta(uint16_t cluster_id, uint16_t attr_id,

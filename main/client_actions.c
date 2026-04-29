@@ -15,6 +15,7 @@
 
 #define CLIENT_ZB_OP_MAX 16
 #define CLIENT_ZB_LOCK_WAIT_MS 1000
+#define CLIENT_SET_STATE_READBACK_DELAY_MS 1500u
 
 typedef enum {
     CLIENT_ZB_OP_NONE = 0,
@@ -268,6 +269,7 @@ client_action_result_t client_actions_set_state(const char *device_id,
 {
     uint8_t endpoint = 0;
     client_zb_op_t op = {0};
+    client_zb_op_t readback = {0};
     device_record_t *dev = find_device_by_id(device_id);
 
     if (!dev || !state || state[0] == '\0') {
@@ -292,7 +294,22 @@ client_action_result_t client_actions_set_state(const char *device_id,
         return CLIENT_ACTION_INVALID_ARG;
     }
 
-    return schedule_zb_op(&op, delay_ms) ? CLIENT_ACTION_OK : CLIENT_ACTION_BUSY;
+    if (!schedule_zb_op(&op, delay_ms)) {
+        return CLIENT_ACTION_BUSY;
+    }
+
+    readback.type = CLIENT_ZB_OP_READ_ATTR;
+    readback.dev_idx = op.dev_idx;
+    readback.generation = op.generation;
+    readback.endpoint = endpoint;
+    readback.cluster_id = 0x0006;
+    readback.attr_id = 0x0000;
+    if (!schedule_zb_op(&readback, delay_ms + CLIENT_SET_STATE_READBACK_DELAY_MS)) {
+        ZB_LOG("CLIENT SET state readback schedule skipped for %s",
+               dm_display_name(dev));
+    }
+
+    return CLIENT_ACTION_OK;
 }
 
 client_action_result_t client_actions_set_brightness(const char *device_id,

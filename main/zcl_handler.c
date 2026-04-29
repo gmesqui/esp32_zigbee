@@ -707,24 +707,16 @@ esp_err_t zcl_on_read_attr_resp(const esp_zb_zcl_cmd_read_attr_resp_message_t *m
     dm_touch(dev, esp_zb_rssi_to_lqi(msg->info.header.rssi), msg->info.header.rssi);
 
     const esp_zb_zcl_read_attr_resp_variable_t *var = msg->variables;
-    bool any_changed = false;
-    uint16_t last_attr_id = 0;
-    uint8_t last_attr_type = 0;
-    uint8_t last_value[8] = {0};
-    int last_size = 0;
     while (var) {
         if (var->status == ESP_ZB_ZCL_STATUS_SUCCESS) {
             int sz = zcl_type_size(var->attribute.data.type);
             if (process_attribute(dev, msg->info.src_endpoint, msg->info.cluster,
                                   var->attribute.id, var->attribute.data.type,
                                   var->attribute.data.value, false)) {
-                any_changed = true;
-                last_attr_id = var->attribute.id;
-                last_attr_type = var->attribute.data.type;
-                last_size = sz > 8 ? 8 : sz;
-                if (last_size > 0) {
-                    memcpy(last_value, var->attribute.data.value, (size_t)last_size);
-                }
+                emit_attr_changed_event(dev, msg->info.src_endpoint,
+                                        msg->info.cluster, var->attribute.id,
+                                        var->attribute.data.type,
+                                        var->attribute.data.value, sz);
             }
             dev->read_rsp_ok++;
         } else {
@@ -755,11 +747,6 @@ esp_err_t zcl_on_read_attr_resp(const esp_zb_zcl_cmd_read_attr_resp_message_t *m
                msg->info.header.rssi, dev->last_lqi,
                has_battery ? "yes" : (battery_unsupported ? "unsupported" : "no"),
                has_voltage ? "yes" : (voltage_unsupported ? "unsupported" : "no"));
-    }
-
-    if (any_changed) {
-        emit_attr_changed_event(dev, msg->info.src_endpoint, msg->info.cluster,
-                                last_attr_id, last_attr_type, last_value, last_size);
     }
 
     return ESP_OK;

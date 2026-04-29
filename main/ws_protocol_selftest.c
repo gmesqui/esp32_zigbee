@@ -118,11 +118,12 @@ static void test_session_lifecycle(ws_protocol_selftest_result_t *result,
     }
 
     const int test_fd = -1001;
-    ws_client_session_open(NULL, test_fd);
+    bool opened = ws_client_session_open(NULL, test_fd);
 
     ws_client_session_snapshot_t snapshot = {0};
     ws_client_session_snapshot(&snapshot);
-    bool ok = snapshot.active &&
+    bool ok = opened &&
+              snapshot.active &&
               snapshot.sockfd == test_fd &&
               ws_client_session_matches(test_fd) &&
               ws_client_session_next_msg_id() == 1 &&
@@ -139,8 +140,7 @@ static void test_serializers(ws_protocol_selftest_result_t *result, bool verbose
     bool opened_here = false;
 
     if (!ws_client_session_is_active()) {
-        ws_client_session_open(NULL, -1002);
-        opened_here = true;
+        opened_here = ws_client_session_open(NULL, -1002);
     }
 
     bool ok = ws_protocol_send_hello_ack(capture_send, &cap, 0);
@@ -179,8 +179,7 @@ static void test_inventory_fragmentation(ws_protocol_selftest_result_t *result,
     bool opened_here = false;
 
     if (!ws_client_session_is_active()) {
-        ws_client_session_open(NULL, -1003);
-        opened_here = true;
+        opened_here = ws_client_session_open(NULL, -1003);
     }
 
     bool ok = ws_protocol_send_inventory_stream(capture_send, &cap);
@@ -208,8 +207,7 @@ static void test_invalid_incoming(ws_protocol_selftest_result_t *result,
     bool opened_here = false;
 
     if (!ws_client_session_is_active()) {
-        ws_client_session_open(NULL, -1004);
-        opened_here = true;
+        opened_here = ws_client_session_open(NULL, -1004);
     }
 
     ws_protocol_handle_text("{", capture_send, &cap);

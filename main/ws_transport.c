@@ -63,11 +63,18 @@ typedef enum {
 
 typedef struct {
     bool in_use;
+    bool broadcast;
+    int target_sockfd;
     ws_tx_priority_t priority;
     TickType_t enqueued_tick;
     uint32_t seq;
     char payload[WS_PROTOCOL_MAX_MESSAGE];
 } ws_tx_msg_t;
+
+typedef struct {
+    bool broadcast;
+    int sockfd;
+} ws_send_ctx_t;
 
 typedef struct {
     uint32_t enqueued;
@@ -94,6 +101,8 @@ static TaskHandle_t s_task_handle;
 static portMUX_TYPE s_refresh_lock = portMUX_INITIALIZER_UNLOCKED;
 static bool s_inventory_refresh_pending;
 static TickType_t s_inventory_refresh_due_tick;
+static portMUX_TYPE s_bootstrap_lock = portMUX_INITIALIZER_UNLOCKED;
+static int s_bootstrap_fds[WS_CLIENT_SESSION_MAX];
 
 typedef struct {
     bool in_use;
@@ -119,6 +128,43 @@ static void clear_inventory_refresh(void)
     s_inventory_refresh_pending = false;
     s_inventory_refresh_due_tick = 0;
     portEXIT_CRITICAL(&s_refresh_lock);
+}
+
+static void queue_bootstrap_for(int sockfd)
+{
+    portENTER_CRITICAL(&s_bootstrap_lock);
+    for (int i = 0; i < WS_CLIENT_SESSION_MAX; i++) {
+        if (s_bootstrap_fds[i] == sockfd) {
+            portEXIT_CRITICAL(&s_bootstrap_lock);
+            return;
+        }
+    }
+    for (int i = 0; i < WS_CLIENT_SESSION_MAX; i++) {
+        if (s_bootstrap_fds[i] == 0) {
+            s_bootstrap_fds[i] = sockfd;
+            break;
+        }
+    }
+    portEXIT_CRITICAL(&s_bootstrap_lock);
+}
+
+static size_t take_bootstrap_fds(int *out, size_t out_len)
+{
+    size_t count = 0;
+
+    if (!out || out_len == 0) {
+        return 0;
+    }
+
+    portENTER_CRITICAL(&s_bootstrap_lock);
+    for (int i = 0; i < WS_CLIENT_SESSION_MAX && count < out_len; i++) {
+        if (s_bootstrap_fds[i] != 0) {
+            out[count++] = s_bootstrap_fds[i];
+            s_bootstrap_fds[i] = 0;
+        }
+    }
+    portEXIT_CRITICAL(&s_bootstrap_lock);
+    return count;
 }
 
 static const char *web_event_type_name(zb_evt_type_t type)
@@ -336,24 +382,44 @@ static void purge_tx_queue(void)
     xSemaphoreGive(s_tx_lock);
 }
 
-static bool send_payload_now(const char *payload, void *ctx)
+static void purge_tx_queue_for(int sockfd)
 {
-    (void)ctx;
+    uint8_t dropped = 0;
 
-    if (!payload || payload[0] == '\0') {
+    if (!s_tx_lock || xSemaphoreTake(s_tx_lock, pdMS_TO_TICKS(20)) != pdTRUE) {
+        return;
+    }
+
+    for (int i = 0; i < WS_TX_QUEUE_LEN; i++) {
+        if (s_tx_queue[i].in_use &&
+            !s_tx_queue[i].broadcast &&
+            s_tx_queue[i].target_sockfd == sockfd) {
+            memset(&s_tx_queue[i], 0, sizeof(s_tx_queue[i]));
+            if (s_tx_count > 0) {
+                s_tx_count--;
+            }
+            dropped++;
+        }
+    }
+
+    if (dropped > 0) {
+        ZB_LOG("WS TX queue purge fd=%d dropped=%u", sockfd, (unsigned)dropped);
+    }
+    xSemaphoreGive(s_tx_lock);
+}
+
+static bool send_payload_to_session(const char *payload,
+                                    const ws_client_session_snapshot_t *session)
+{
+    if (!payload || payload[0] == '\0' || !session ||
+        !session->active || !session->server) {
         return false;
     }
 
-    ws_client_session_snapshot_t session;
-    ws_client_session_snapshot(&session);
-    if (!session.active || !session.server) {
-        return false;
-    }
-
-    if (httpd_ws_get_fd_info(session.server, session.sockfd) !=
+    if (httpd_ws_get_fd_info(session->server, session->sockfd) !=
         HTTPD_WS_CLIENT_WEBSOCKET) {
-        if (ws_client_session_close(session.sockfd)) {
-            purge_tx_queue();
+        if (ws_client_session_close(session->sockfd)) {
+            ZB_LOG("WS TX stale session fd=%d closed", session->sockfd);
         }
         return false;
     }
@@ -367,7 +433,7 @@ static bool send_payload_now(const char *payload, void *ctx)
     };
 
     int64_t send_start_us = esp_timer_get_time();
-    esp_err_t err = httpd_ws_send_data(session.server, session.sockfd, &frame);
+    esp_err_t err = httpd_ws_send_data(session->server, session->sockfd, &frame);
     uint32_t send_ms =
         (uint32_t)((esp_timer_get_time() - send_start_us) / 1000);
     if (send_ms >= WS_SEND_TIME_WARN_MS) {
@@ -377,15 +443,43 @@ static bool send_payload_now(const char *payload, void *ctx)
     }
 
     if (err != ESP_OK) {
-        ZB_LOG("WS TX failed err=0x%X, closing session", err);
-        httpd_sess_trigger_close(session.server, session.sockfd);
-        if (ws_client_session_close(session.sockfd)) {
-            purge_tx_queue();
-        }
+        ZB_LOG("WS TX failed fd=%d err=0x%X, closing session",
+               session->sockfd, err);
+        httpd_sess_trigger_close(session->server, session->sockfd);
+        ws_client_session_close(session->sockfd);
         return false;
     }
 
     return true;
+}
+
+static bool send_payload_now(const char *payload, void *ctx)
+{
+    ws_send_ctx_t *send_ctx = (ws_send_ctx_t *)ctx;
+
+    if (!payload || payload[0] == '\0') {
+        return false;
+    }
+
+    if (send_ctx && !send_ctx->broadcast) {
+        ws_client_session_snapshot_t sessions[WS_CLIENT_SESSION_MAX];
+        size_t count = ws_client_session_collect(sessions,
+                                                 WS_CLIENT_SESSION_MAX);
+        for (size_t i = 0; i < count; i++) {
+            if (sessions[i].sockfd == send_ctx->sockfd) {
+                return send_payload_to_session(payload, &sessions[i]);
+            }
+        }
+        return false;
+    }
+
+    ws_client_session_snapshot_t sessions[WS_CLIENT_SESSION_MAX];
+    size_t count = ws_client_session_collect(sessions, WS_CLIENT_SESSION_MAX);
+    bool ok = false;
+    for (size_t i = 0; i < count; i++) {
+        ok = send_payload_to_session(payload, &sessions[i]) || ok;
+    }
+    return ok;
 }
 
 static int tx_find_free_locked(void)
@@ -432,9 +526,12 @@ static int tx_find_evictable_locked(ws_tx_priority_t incoming)
 }
 
 static void tx_store_locked(int idx, const char *payload, size_t len,
-                            ws_tx_priority_t priority)
+                            ws_tx_priority_t priority,
+                            const ws_send_ctx_t *send_ctx)
 {
     s_tx_queue[idx].in_use = true;
+    s_tx_queue[idx].broadcast = !send_ctx || send_ctx->broadcast;
+    s_tx_queue[idx].target_sockfd = send_ctx ? send_ctx->sockfd : -1;
     s_tx_queue[idx].priority = priority;
     s_tx_queue[idx].enqueued_tick = xTaskGetTickCount();
     s_tx_queue[idx].seq = ++s_tx_seq;
@@ -458,7 +555,8 @@ static void tx_store_locked(int idx, const char *payload, size_t len,
  *   Critical may evict oldest telemetry, then oldest structural. Critical is
  *   dropped only if the queue is already full of critical messages.
  */
-static bool enqueue_payload_prio(const char *payload, ws_tx_priority_t priority)
+static bool enqueue_payload_prio(const char *payload, ws_tx_priority_t priority,
+                                 const ws_send_ctx_t *send_ctx)
 {
     if (!payload || payload[0] == '\0') {
         return false;
@@ -516,27 +614,27 @@ static bool enqueue_payload_prio(const char *payload, ws_tx_priority_t priority)
         }
     }
 
-    tx_store_locked(idx, payload, len, priority);
+    tx_store_locked(idx, payload, len, priority, send_ctx);
     xSemaphoreGive(s_tx_lock);
     return true;
 }
 
 static bool enqueue_payload_critical(const char *payload, void *ctx)
 {
-    (void)ctx;
-    return enqueue_payload_prio(payload, WS_TX_PRIORITY_CRITICAL);
+    return enqueue_payload_prio(payload, WS_TX_PRIORITY_CRITICAL,
+                                (const ws_send_ctx_t *)ctx);
 }
 
 static bool enqueue_payload_structural(const char *payload, void *ctx)
 {
-    (void)ctx;
-    return enqueue_payload_prio(payload, WS_TX_PRIORITY_STRUCTURAL);
+    return enqueue_payload_prio(payload, WS_TX_PRIORITY_STRUCTURAL,
+                                (const ws_send_ctx_t *)ctx);
 }
 
 static bool enqueue_payload_telemetry(const char *payload, void *ctx)
 {
-    (void)ctx;
-    return enqueue_payload_prio(payload, WS_TX_PRIORITY_TELEMETRY);
+    return enqueue_payload_prio(payload, WS_TX_PRIORITY_TELEMETRY,
+                                (const ws_send_ctx_t *)ctx);
 }
 
 static ws_tx_priority_t payload_priority(const char *payload)
@@ -564,8 +662,8 @@ static ws_tx_priority_t payload_priority(const char *payload)
 
 static bool enqueue_payload_auto(const char *payload, void *ctx)
 {
-    (void)ctx;
-    return enqueue_payload_prio(payload, payload_priority(payload));
+    return enqueue_payload_prio(payload, payload_priority(payload),
+                                (const ws_send_ctx_t *)ctx);
 }
 
 static bool tx_pop_next(ws_tx_msg_t *out)
@@ -673,7 +771,11 @@ static void drain_tx_queue(void)
                    (unsigned long)queue_ms);
         }
 
-        if (send_payload_now(msg.payload, NULL)) {
+        ws_send_ctx_t send_ctx = {
+            .broadcast = msg.broadcast,
+            .sockfd = msg.target_sockfd,
+        };
+        if (send_payload_now(msg.payload, &send_ctx)) {
             s_metrics.sent++;
         } else {
             s_metrics.send_failures++;
@@ -684,20 +786,33 @@ static void drain_tx_queue(void)
 
 static void start_autonomous_debug_stream(void)
 {
-    if (!ws_client_session_is_active()) {
-        return;
-    }
+    int fds[WS_CLIENT_SESSION_MAX];
+    size_t count = take_bootstrap_fds(fds, WS_CLIENT_SESSION_MAX);
 
-    ZB_LOG("WS autonomous sync: begin (no client hello required)");
-    bool ok = ws_protocol_send_bootstrap(send_payload_now, NULL);
-    ZB_LOG("WS autonomous sync: %s", ok ? "complete" : "failed");
-    if (ok) {
-        ZB_LOG("WS stream mode: active, forwarding future Zigbee events");
+    for (size_t i = 0; i < count; i++) {
+        ws_send_ctx_t send_ctx = {
+            .broadcast = false,
+            .sockfd = fds[i],
+        };
+        ZB_LOG("WS autonomous sync: begin fd=%d (no client hello required)",
+               fds[i]);
+        bool ok = ws_protocol_send_bootstrap(send_payload_now, &send_ctx);
+        ZB_LOG("WS autonomous sync fd=%d: %s", fds[i],
+               ok ? "complete" : "failed");
+        if (ok) {
+            ZB_LOG("WS stream mode: active fd=%d, forwarding future Zigbee events",
+                   fds[i]);
+        }
     }
 }
 
 static esp_err_t ws_recv_text(httpd_req_t *req)
 {
+    int sockfd = httpd_req_to_sockfd(req);
+    ws_send_ctx_t reply_ctx = {
+        .broadcast = false,
+        .sockfd = sockfd,
+    };
     httpd_ws_frame_t frame = {
         .type = HTTPD_WS_TYPE_TEXT,
     };
@@ -708,9 +823,8 @@ static esp_err_t ws_recv_text(httpd_req_t *req)
     }
 
     if (frame.type == HTTPD_WS_TYPE_CLOSE) {
-        int sockfd = httpd_req_to_sockfd(req);
         if (ws_client_session_close(sockfd)) {
-            purge_tx_queue();
+            purge_tx_queue_for(sockfd);
             clear_inventory_refresh();
             ZB_LOG("WS client close frame fd=%d", sockfd);
             log_tx_metrics("close_frame");
@@ -724,14 +838,14 @@ static esp_err_t ws_recv_text(httpd_req_t *req)
 
     if (frame.len >= WS_RX_MAX_MESSAGE) {
         ZB_LOG("WS RX drop oversized frame len=%u", (unsigned)frame.len);
-        ws_protocol_send_error(enqueue_payload_critical, NULL, 0, "malformed_message",
+        ws_protocol_send_error(enqueue_payload_critical, &reply_ctx, 0, "malformed_message",
                                "WebSocket frame exceeds input limit");
         return ESP_OK;
     }
 
     char *buf = calloc(1u, frame.len + 1u);
     if (!buf) {
-        ws_protocol_send_error(enqueue_payload_critical, NULL, 0,
+        ws_protocol_send_error(enqueue_payload_critical, &reply_ctx, 0,
                                "internal_error",
                                "Unable to allocate receive buffer");
         return ESP_ERR_NO_MEM;
@@ -746,7 +860,7 @@ static esp_err_t ws_recv_text(httpd_req_t *req)
 
     buf[frame.len] = '\0';
     ZB_LOG("WS RX text frame bytes=%u", (unsigned)frame.len);
-    ws_protocol_handle_text(buf, enqueue_payload_auto, NULL);
+    ws_protocol_handle_text(buf, enqueue_payload_auto, &reply_ctx);
     free(buf);
     return ESP_OK;
 }
@@ -756,21 +870,19 @@ static esp_err_t ws_handler(httpd_req_t *req)
     int sockfd = httpd_req_to_sockfd(req);
 
     if (req->method == HTTP_GET) {
-        ws_client_session_snapshot_t previous;
-        ws_client_session_snapshot(&previous);
-        if (previous.active && previous.server && previous.sockfd != sockfd) {
-            httpd_sess_trigger_close(previous.server, previous.sockfd);
-            ws_client_session_close(previous.sockfd);
-            s_metrics.reconnects++;
+        if (!ws_client_session_open(s_server, sockfd)) {
+            ZB_LOG("WS client rejected fd=%d: session table full", sockfd);
+            httpd_sess_trigger_close(s_server, sockfd);
+            return ESP_OK;
         }
 
-        purge_tx_queue();
-        clear_inventory_refresh();
-        ws_client_session_open(s_server, sockfd);
-        ZB_LOG("WS client connected fd=%d mode=autonomous_debug_stream reconnects=%lu",
-               sockfd, (unsigned long)s_metrics.reconnects);
+        s_metrics.reconnects++;
+        ZB_LOG("WS client connected fd=%d mode=autonomous_debug_stream sessions_max=%u reconnects=%lu",
+               sockfd, (unsigned)WS_CLIENT_SESSION_MAX,
+               (unsigned long)s_metrics.reconnects);
         log_tx_metrics("connect");
-        ZB_LOG("WS autonomous sync: scheduled after handshake");
+        queue_bootstrap_for(sockfd);
+        ZB_LOG("WS autonomous sync: scheduled after handshake fd=%d", sockfd);
         xTaskNotify(s_task_handle, WS_NOTIFY_AUTONOMOUS_SYNC, eSetBits);
         return ESP_OK;
     }
@@ -786,7 +898,7 @@ static void ws_close_fn(httpd_handle_t hd, int sockfd)
     (void)hd;
 
     if (ws_client_session_close(sockfd)) {
-        purge_tx_queue();
+        purge_tx_queue_for(sockfd);
         clear_inventory_refresh();
         ZB_LOG("WS client disconnected fd=%d", sockfd);
         log_tx_metrics("disconnect");
@@ -841,7 +953,7 @@ static const char s_web_index_html[] =
 "<section class=\"page\" id=\"page-network\"><h2>Red y servicios</h2><div class=\"grid\" id=\"networkMetrics\"></div><div class=\"panel\" id=\"networkDiag\"></div></section>"
 "<section class=\"page\" id=\"page-events\"><h2>Eventos recientes</h2><div class=\"events\" id=\"events\"></div></section>"
 "</main><script>"
-"let cfg={},lastStatus=null,autoRefresh=true,configDirty=false;"
+"let cfg={},lastStatus=null,autoRefresh=true,configDirty=false,ws=null,wsRetry=null,wsLive=false,statusLoadedAt=0,statusUptimeAt=0;"
 "const CONFIG_FIELD_IDS=['mdns_hostname','mdns_instance','ntp_server','timezone','permit_join_duration_s','report_always_on_max_s','report_sleepy_max_s','presence_probe_grace_s','presence_offline_grace_s'];"
 "const TZ_OPTIONS=["
 "{v:'UTC12',l:'UTC-12:00 - fija'},{v:'UTC11',l:'UTC-11:00 - fija'},{v:'HST10',l:'UTC-10:00 - Hawai (HST)'},{v:'UTC9:30',l:'UTC-09:30 - fija'},{v:'AKST9AKDT,M3.2.0,M11.1.0',l:'UTC-09:00 / -08:00 - Alaska'},{v:'PST8PDT,M3.2.0,M11.1.0',l:'UTC-08:00 / -07:00 - Pacifico'},{v:'MST7MDT,M3.2.0,M11.1.0',l:'UTC-07:00 / -06:00 - Montana'},{v:'MST7',l:'UTC-07:00 - Arizona/MST fija'},{v:'CST6CDT,M3.2.0,M11.1.0',l:'UTC-06:00 / -05:00 - Central US'},{v:'EST5EDT,M3.2.0,M11.1.0',l:'UTC-05:00 / -04:00 - Este US'},{v:'EST5',l:'UTC-05:00 - EST fija'},{v:'UTC4',l:'UTC-04:00 - fija'},{v:'UTC3:30',l:'UTC-03:30 - fija'},{v:'UTC3',l:'UTC-03:00 - fija'},{v:'UTC2',l:'UTC-02:00 - fija'},{v:'UTC1',l:'UTC-01:00 - fija'},"
@@ -854,7 +966,8 @@ static const char s_web_index_html[] =
 "function readings(d){let r=d.readings||{},a=[];for(const k of Object.keys(r)){let x=r[k];a.push(`${esc(k)}: ${esc(x.value)}${x.unit?' '+esc(x.unit):''}`)}return a.join('<br>')||'-'}"
 "function reportingLabel(r){if(!r)return'pendiente';if(r.configured)return'ok';if(r.in_progress)return'configurando';if((r.failed||0)>0)return'fallo/parcial';return'pendiente'}"
 "function reportingFailureRows(d){let rp=d.reporting||{},fs=rp.failures||[];if(!fs.length&&!rp.overflow)return '<div><span class=\"label\">Fallos reporting</span><strong>Sin fallos detallados</strong></div>';let rows=fs.map(f=>{let cname=esc(f.cluster_name||hex(f.cluster_id));let what=f.reason==='bind_fail'?('bind '+cname):(f.reason==='write_fail'?('write '+cname+' '+hex(f.attr_id)):('EP '+f.endpoint+' '+cname+' '+hex(f.attr_id)));let why=f.reason==='missing'?'sin respuesta':(f.reason==='bind_fail'?'bind status '+hex(f.status):(f.reason==='write_fail'?'write status '+hex(f.status):'status '+hex(f.status)));return `<div><span class=\"label\">${what}</span><strong>${why}</strong></div>`}).join('');if(rp.overflow)rows+='<div><span class=\"label\">Fallos reporting</span><strong>lista truncada</strong></div>';return rows}"
-"function ago(ts){let d=Math.max(0,Math.floor((lastStatus.system.uptime_s||0)-ts));return d<60?d+'s':Math.floor(d/60)+'m'}"
+"function nowUptime(){return statusUptimeAt+Math.max(0,Math.floor(Date.now()/1000-statusLoadedAt))}"
+"function ago(ts){let d=Math.max(0,Math.floor(nowUptime()-ts));return d<60?d+'s':Math.floor(d/60)+'m'}"
 "function bytes(n){if(n==null)return '-';return n>=1048576?(n/1048576).toFixed(1)+' MB':n>=1024?(n/1024).toFixed(1)+' KB':n+' B'}"
 "function hex(n){return n==null?'-':'0x'+Number(n).toString(16).toUpperCase()}"
 "function clusters(a){return (a||[]).map(x=>'0x'+Number(x).toString(16).padStart(4,'0').toUpperCase()).join(', ')||'-'}"
@@ -882,6 +995,7 @@ static const char s_web_index_html[] =
 "function showPage(){let p=pageName();document.querySelectorAll('.page').forEach(x=>x.classList.toggle('active',x.id==='page-'+p));document.querySelectorAll('nav a').forEach(x=>x.classList.toggle('active',x.dataset.page===(p==='device'?'devices':p)))}"
 "async function load(forceForm){const s=await j('/api/status');cfg=s.config;"
 "lastStatus=s;"
+"statusLoadedAt=Math.floor(Date.now()/1000);statusUptimeAt=(s.system&&s.system.uptime_s)||0;"
 "fillConfigForm(!!forceForm);"
 "document.getElementById('metrics').innerHTML=["
 "metric('mDNS',cfg.mdns_hostname+'.local'),"
@@ -902,6 +1016,17 @@ static const char s_web_index_html[] =
 "metric('Reset',esc(s.system.reset_reason||'-'))"
 "].join('');"
 "renderConfigTime();renderDevices();renderEvents();renderSystem();renderNetwork();renderZigbee();renderDevicePage();}"
+"function renderAll(){renderConfigTime();renderDevices();renderEvents();renderSystem();renderNetwork();renderZigbee();renderDevicePage()}"
+"function recomputeDeviceSummary(){if(!lastStatus)return;let ds=lastStatus.devices||[];lastStatus.online_devices=ds.filter(d=>d.online).length;lastStatus.device_count=ds.length;lastStatus.summary=lastStatus.summary||{};lastStatus.summary.sleepy_devices=ds.filter(d=>d.is_sleepy).length;lastStatus.summary.router_devices=ds.filter(d=>!d.is_sleepy).length;lastStatus.summary.reporting_pending=ds.filter(d=>!d.reporting||!d.reporting.configured||d.reporting.in_progress).length}"
+"function rememberEvent(type,data){if(!lastStatus)return;let e={ts:nowUptime(),type:type||'event',device_id:data&&data.device_id,name:data&&data.name,status:data&&data.status,duration:data&&data.duration};lastStatus.events=lastStatus.events||[];lastStatus.events.unshift(e);lastStatus.events=lastStatus.events.slice(0,24)}"
+"function ensureDevice(id){if(!lastStatus||!id)return null;let ds=lastStatus.devices=lastStatus.devices||[];let d=ds.find(x=>String(x.ieee).toLowerCase()===String(id).toLowerCase());if(!d){d={ieee:id,name:id,online:false,is_sleepy:false,state:'unknown',readings:{},attrs:[],reporting:{configured:false,in_progress:false,expected:0,received:0,failed:0},stats:{}};ds.push(d)}return d}"
+"function applyStateSnapshot(dev){if(!dev||!dev.device_id)return;let d=ensureDevice(dev.device_id);if(!d)return;let m=dev.meta||{};if(m.reachable!=null)d.online=!!m.reachable;if(m.last_seen!=null)d.last_seen_s=m.last_seen;if(m.link_quality!=null)d.lqi=m.link_quality;let st=dev.state||{};d.readings=d.readings||{};Object.keys(st).forEach(k=>{d.readings[k]=Object.assign({},d.readings[k]||{},st[k])})}"
+"function applyInventoryDevice(dev){if(!dev||!dev.device_id)return;let d=ensureDevice(dev.device_id);if(!d)return;d.name=dev.name||d.name;d.manufacturer=dev.manufacturer||d.manufacturer;d.model=dev.model||d.model;d.power_source=dev.power_source||d.power_source;d.is_sleepy=!!dev.is_sleepy}"
+"let invChunks={},stateChunks={},resyncTimer=null;"
+"function acceptChunk(store,data,done){if(!data||!data.stream_id)return;let s=store[data.stream_id]||{chunks:{},final:null};s.chunks[data.index]=Array.isArray(data.devices)?data.devices:[];if(data.final)s.final=data.index;store[data.stream_id]=s;if(s.final==null)return;let out=[];for(let i=0;i<=s.final;i++){if(!s.chunks[i])return;out=out.concat(s.chunks[i])}delete store[data.stream_id];done(out)}"
+"function applyGatewayEvent(type,data){if(!lastStatus||!data)return;if(type==='inventory_chunk'){acceptChunk(invChunks,data,items=>{items.forEach(applyInventoryDevice);recomputeDeviceSummary();renderAll()});return}if(type==='state_chunk'){acceptChunk(stateChunks,data,items=>{items.forEach(applyStateSnapshot);recomputeDeviceSummary();renderAll()});return}rememberEvent(type,data);if(type==='event'&&data.device_id){let d=ensureDevice(data.device_id),c=data.changes||{};if(c.reachable){d.online=!!c.reachable.value;d.last_seen_s=c.reachable.ts||nowUptime()}Object.keys(c).forEach(k=>{if(k!=='reachable'){d.readings=d.readings||{};d.readings[k]=Object.assign({},d.readings[k]||{},c[k]);d.last_seen_s=c[k].ts||nowUptime()}});recomputeDeviceSummary();renderAll();return}if(type==='device_left'&&data.device_id){let d=ensureDevice(data.device_id);if(d)d.online=false;recomputeDeviceSummary();renderAll();scheduleResync()}else if(type==='device_joined'||type==='device_updated'){if(data.device_id){let d=ensureDevice(data.device_id);if(data.name)d.name=data.name}renderAll();scheduleResync()}}"
+"function scheduleResync(){if(resyncTimer)return;resyncTimer=setTimeout(()=>{resyncTimer=null;if(wsLive&&ws&&ws.readyState===1){ws.send(JSON.stringify({type:'resync',msg_id:Date.now()%1000000000,require_ack:false,data:{}}))}else{load(false).catch(()=>{})}},1200)}"
+"function connectWs(){if(ws||wsRetry)return;let proto=location.protocol==='https:'?'wss':'ws';ws=new WebSocket(proto+'://'+location.host+'/ws');ws.onopen=()=>{wsLive=true;setMsg('WebSocket activo')};ws.onmessage=ev=>{try{let m=JSON.parse(ev.data);applyGatewayEvent(m.type,m.data||{})}catch(e){}};ws.onclose=()=>{ws=null;wsLive=false;wsRetry=setTimeout(()=>{wsRetry=null;connectWs()},3000)};ws.onerror=()=>{try{ws.close()}catch(e){}}}"
 "document.getElementById('save').onclick=async()=>{try{await j('/api/config',{method:'PUT',headers:{'Content-Type':'application/json'},body:JSON.stringify({mdns_hostname:mdns_hostname.value,mdns_instance:mdns_instance.value,ntp_server:ntp_server.value,timezone:timezone.value,permit_join_duration_s:+permit_join_duration_s.value,report_always_on_max_s:+report_always_on_max_s.value,report_sleepy_max_s:+report_sleepy_max_s.value,presence_probe_grace_s:+presence_probe_grace_s.value,presence_offline_grace_s:+presence_offline_grace_s.value})});configDirty=false;setMsg('Configuracion guardada');await load(true);}catch(e){setMsg('Error: '+e.message)}};"
 "document.getElementById('refresh').onclick=()=>{configDirty=false;load(true).catch(e=>setMsg('Error: '+e.message))};"
 "document.getElementById('autoRefresh').onclick=()=>{autoRefresh=!autoRefresh;document.getElementById('autoRefresh').textContent=autoRefresh?'Pausar auto-refresh':'Reanudar auto-refresh'};"
@@ -919,7 +1044,7 @@ static const char s_web_index_html[] =
 "async function renameDev(id,name){try{await j('/api/device/rename',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({device_id:id,new_name:name})});setMsg('Nombre guardado');await load();}catch(e){setMsg('Error: '+e.message)}}"
 "async function devAction(url,id){try{await j(url,{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({device_id:id})});setMsg('Accion enviada');await load();}catch(e){setMsg('Error: '+e.message)}}"
 "async function postAction(url,msg){try{await j(url,{method:'POST',headers:{'Content-Type':'application/json'},body:'{}'});setMsg(msg);setTimeout(()=>load().catch(()=>{}),800)}catch(e){setMsg('Error: '+e.message)}}"
-"populateTimezones();setupConfigDirty();showPage();load(true).catch(e=>setMsg('Error: '+e.message));setInterval(()=>{if(autoRefresh)load(false).catch(()=>{})},5000);"
+"populateTimezones();setupConfigDirty();showPage();load(true).then(connectWs).catch(e=>setMsg('Error: '+e.message));setInterval(()=>{if(autoRefresh&&!wsLive)load(false).catch(()=>{})},5000);setInterval(renderAll,1000);"
 "</script></body></html>";
 
 static void web_resp_close_after_send(httpd_req_t *req)
@@ -1551,16 +1676,20 @@ static esp_err_t web_post_zigbee_factory_reset_handler(httpd_req_t *req)
 
 static esp_err_t web_post_close_ws_handler(httpd_req_t *req)
 {
-    ws_client_session_snapshot_t session;
-    ws_client_session_snapshot(&session);
+    ws_client_session_snapshot_t sessions[WS_CLIENT_SESSION_MAX];
+    size_t count = ws_client_session_collect(sessions, WS_CLIENT_SESSION_MAX);
     bool closed = false;
 
-    if (session.active && session.server) {
-        httpd_sess_trigger_close(session.server, session.sockfd);
-        ws_client_session_close(session.sockfd);
+    for (size_t i = 0; i < count; i++) {
+        if (sessions[i].active && sessions[i].server) {
+            httpd_sess_trigger_close(sessions[i].server, sessions[i].sockfd);
+            ws_client_session_close(sessions[i].sockfd);
+            closed = true;
+        }
+    }
+    if (closed) {
         purge_tx_queue();
         clear_inventory_refresh();
-        closed = true;
     }
     if (closed) {
         web_events_record_action("close_ws", 0, "websocket");
@@ -2572,6 +2701,7 @@ void ws_transport_init(EventGroupHandle_t eth_ready_eg)
     s_eth_eg = eth_ready_eg;
     s_tx_lock = xSemaphoreCreateMutex();
     configASSERT(s_tx_lock);
+    memset(s_bootstrap_fds, 0, sizeof(s_bootstrap_fds));
     ws_client_session_init();
     zb_events_register(web_events_record_zigbee);
 

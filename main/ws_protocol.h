@@ -5,9 +5,9 @@
 #include "zb_events.h"
 
 #define WS_PROTOCOL_VERSION       1
-#define WS_PROTOCOL_MAX_MESSAGE   768
-#define WS_PROTOCOL_ITEM_BUFFER   384
-#define WS_PROTOCOL_CHUNK_MARGIN  96
+#define WS_PROTOCOL_MAX_MESSAGE   1024
+#define WS_PROTOCOL_ITEM_BUFFER   768
+#define WS_PROTOCOL_CHUNK_MARGIN  128
 
 typedef bool (*ws_protocol_send_fn_t)(const char *payload, void *ctx);
 

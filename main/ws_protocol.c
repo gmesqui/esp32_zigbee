@@ -610,6 +610,27 @@ static ws_rx_status_t execute_cmd_data(cJSON *data,
         }
     }
 
+    if (strcmp(command->valuestring, "get") == 0) {
+        const char *attr_name = NULL;
+        cJSON *name = cJSON_GetObjectItemCaseSensitive(params, "name");
+
+        if (cJSON_IsString(name) && name->valuestring) {
+            attr_name = name->valuestring;
+        } else if (strcmp(cluster->valuestring, "onoff") == 0) {
+            attr_name = "state";
+        }
+
+        if (attr_name) {
+            client_action_result_t result =
+                client_actions_read_named_attribute(device_id->valuestring,
+                                                    attr_name, 0);
+            if (action_out) {
+                *action_out = result;
+            }
+            return action_to_rx_status(result);
+        }
+    }
+
     return WS_RX_UNSUPPORTED_COMMAND;
 }
 

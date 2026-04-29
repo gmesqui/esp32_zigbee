@@ -47,8 +47,22 @@
 
 #define TIME_STATUS_MASTER_BIT          (1u << 0)
 #define TIME_STATUS_SYNCHRONIZED_BIT    (1u << 1)
-#define TIME_STATUS_MASTER_ZONE_DST_BIT (1u << 2)
 #define POLL_CTRL_FAST_POLL_TIMEOUT_QS  120u
+
+#define ZCL_FRAME_TYPE_PROFILE_WIDE     0x00u
+#define ZCL_FRAME_TYPE_CLUSTER_SPECIFIC 0x01u
+#define ZCL_FRAME_TYPE_MASK             0x03u
+#define ZCL_FRAME_MANUF_SPECIFIC_BIT    (1u << 2)
+#define ZCL_FRAME_DIRECTION_BIT         (1u << 3)
+#define ZCL_FRAME_DISABLE_DEFAULT_RSP   (1u << 4)
+
+#define ZCL_CMD_READ_ATTR               0x00u
+#define ZCL_CMD_WRITE_ATTR              0x02u
+#define ZCL_CMD_CONFIG_REPORT           0x06u
+#define ZCL_CMD_READ_REPORT_CFG         0x08u
+#define ZCL_CMD_REPORT_ATTR             0x0Au
+#define ZCL_CMD_DEFAULT_RSP             0x0Bu
+#define ZCL_CMD_DISCOVER_ATTR           0x0Cu
 
 static volatile bool s_network_ready = false;
 static bool s_time_attr_refresh_started = false;
@@ -195,6 +209,152 @@ static void format_hex_preview(const uint8_t *data, size_t len,
     }
 }
 
+static const char *zcl_profile_cmd_name(uint8_t cmd_id)
+{
+    switch (cmd_id) {
+        case ZCL_CMD_READ_ATTR:
+            return "READ_ATTR";
+        case ZCL_CMD_WRITE_ATTR:
+            return "WRITE_ATTR";
+        case ZCL_CMD_CONFIG_REPORT:
+            return "CONFIG_REPORT";
+        case ZCL_CMD_READ_REPORT_CFG:
+            return "READ_REPORT_CFG";
+        case ZCL_CMD_REPORT_ATTR:
+            return "REPORT_ATTR";
+        case ZCL_CMD_DEFAULT_RSP:
+            return "DEFAULT_RSP";
+        case ZCL_CMD_DISCOVER_ATTR:
+            return "DISCOVER_ATTR";
+        default:
+            return "PROFILE_CMD";
+    }
+}
+
+static bool zcl_profile_cmd_is_request(uint8_t cmd_id)
+{
+    switch (cmd_id) {
+        case ZCL_CMD_READ_ATTR:
+        case ZCL_CMD_WRITE_ATTR:
+        case ZCL_CMD_CONFIG_REPORT:
+        case ZCL_CMD_READ_REPORT_CFG:
+        case ZCL_CMD_DISCOVER_ATTR:
+            return true;
+        default:
+            return false;
+    }
+}
+
+static void format_zcl_attr_id_list(const uint8_t *payload, size_t len,
+                                    char *buf, size_t buf_len)
+{
+    size_t used = 0;
+
+    if (!buf || buf_len == 0) {
+        return;
+    }
+    buf[0] = '\0';
+
+    if (!payload || len < 2) {
+        snprintf(buf, buf_len, "-");
+        return;
+    }
+
+    size_t attr_count = len / 2u;
+    if (attr_count > 8u) {
+        attr_count = 8u;
+    }
+
+    for (size_t i = 0; i < attr_count; i++) {
+        uint16_t attr_id = (uint16_t)payload[i * 2u] |
+                           ((uint16_t)payload[i * 2u + 1u] << 8);
+        int n = snprintf(buf + used, buf_len - used, "%s0x%04X",
+                         i ? "," : "", attr_id);
+        if (n < 0 || (size_t)n >= buf_len - used) {
+            break;
+        }
+        used += (size_t)n;
+    }
+
+    if ((len / 2u) > attr_count && used < buf_len - 4) {
+        snprintf(buf + used, buf_len - used, ",...");
+    }
+}
+
+static void log_zcl_frame_preview(const esp_zb_apsde_data_ind_t *ind,
+                                  const device_record_t *dev)
+{
+    if (!ind || !dev || ind->profile_id != HA_PROFILE_ID ||
+        ind->dst_endpoint != COORD_ENDPOINT || !ind->asdu ||
+        ind->asdu_length < 3) {
+        return;
+    }
+
+    const uint8_t *asdu = ind->asdu;
+    size_t len = (size_t)ind->asdu_length;
+    uint8_t frame_control = asdu[0];
+    uint8_t frame_type = frame_control & ZCL_FRAME_TYPE_MASK;
+    bool manuf_specific =
+        (frame_control & ZCL_FRAME_MANUF_SPECIFIC_BIT) != 0;
+    bool server_to_client =
+        (frame_control & ZCL_FRAME_DIRECTION_BIT) != 0;
+    bool disable_default_rsp =
+        (frame_control & ZCL_FRAME_DISABLE_DEFAULT_RSP) != 0;
+    size_t pos = 1;
+    uint16_t manuf_code = 0;
+
+    if (manuf_specific) {
+        if (len < 5) {
+            return;
+        }
+        manuf_code = (uint16_t)asdu[pos] | ((uint16_t)asdu[pos + 1] << 8);
+        pos += 2;
+    }
+
+    uint8_t tsn = asdu[pos++];
+    uint8_t cmd_id = asdu[pos++];
+    const uint8_t *payload = asdu + pos;
+    size_t payload_len = len - pos;
+
+    if (frame_type == ZCL_FRAME_TYPE_PROFILE_WIDE) {
+        if (!zcl_profile_cmd_is_request(cmd_id)) {
+            return;
+        }
+
+        char attrs[96];
+        attrs[0] = '\0';
+
+        if (cmd_id == ZCL_CMD_READ_ATTR) {
+            format_zcl_attr_id_list(payload, payload_len, attrs, sizeof(attrs));
+        }
+
+        ZB_LOG("RX ZCL_FRAME src=%s/%u dst_ep=%u cluster=%s cmd=%s(0x%02X) dir=%s tsn=0x%02X disable_default=%u mfr_specific=%u mfr=0x%04X payload_len=%lu",
+               dm_display_name(dev), ind->src_endpoint, ind->dst_endpoint,
+               utils_cluster_name(ind->cluster_id), zcl_profile_cmd_name(cmd_id),
+               cmd_id, server_to_client ? "srv_to_cli" : "cli_to_srv", tsn,
+               disable_default_rsp ? 1u : 0u, manuf_specific ? 1u : 0u,
+               manuf_code, (unsigned long)payload_len);
+        if (attrs[0]) {
+            ZB_LOG("RX ZCL_READ_ATTRS src=%s/%u cluster=%s tsn=0x%02X attrs=[%s]",
+                   dm_display_name(dev), ind->src_endpoint,
+                   utils_cluster_name(ind->cluster_id), tsn, attrs);
+        }
+    } else if (frame_type == ZCL_FRAME_TYPE_CLUSTER_SPECIFIC) {
+        ZB_LOG("RX ZCL_FRAME src=%s/%u dst_ep=%u cluster=%s cmd=CLUSTER_CMD(0x%02X) dir=%s tsn=0x%02X disable_default=%u mfr_specific=%u mfr=0x%04X payload_len=%lu",
+               dm_display_name(dev), ind->src_endpoint, ind->dst_endpoint,
+               utils_cluster_name(ind->cluster_id), cmd_id,
+               server_to_client ? "srv_to_cli" : "cli_to_srv", tsn,
+               disable_default_rsp ? 1u : 0u, manuf_specific ? 1u : 0u,
+               manuf_code, (unsigned long)payload_len);
+    } else {
+        ZB_LOG("RX ZCL_FRAME src=%s/%u dst_ep=%u cluster=%s frame_type=0x%02X cmd=0x%02X dir=%s tsn=0x%02X payload_len=%lu",
+               dm_display_name(dev), ind->src_endpoint, ind->dst_endpoint,
+               utils_cluster_name(ind->cluster_id), frame_type, cmd_id,
+               server_to_client ? "srv_to_cli" : "cli_to_srv", tsn,
+               (unsigned long)payload_len);
+    }
+}
+
 static void log_generic_zcl_message(esp_zb_core_action_callback_id_t cb_id,
                                     const void *message)
 {
@@ -259,6 +419,7 @@ static bool zb_aps_data_indication_handler(esp_zb_apsde_data_ind_t ind)
            ind.profile_id, utils_cluster_name(ind.cluster_id),
            (unsigned long)ind.asdu_length, ind.status,
            ind.security_status, ind.lqi, asdu_preview);
+    log_zcl_frame_preview(&ind, dev);
 
     return false;
 }
@@ -324,8 +485,7 @@ static void time_attr_update_alarm(uint8_t param)
             }
 
             time_status = TIME_STATUS_MASTER_BIT |
-                          TIME_STATUS_SYNCHRONIZED_BIT |
-                          TIME_STATUS_MASTER_ZONE_DST_BIT;
+                          TIME_STATUS_SYNCHRONIZED_BIT;
         }
     }
 
