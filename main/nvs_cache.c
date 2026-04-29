@@ -71,6 +71,10 @@ static size_t serialise(uint8_t idx)
 
     uint8_t *p = s_blob;
 
+    bool descriptors_complete = dm_has_complete_descriptors(d);
+    bool reporting_configured = d->reporting_configured && descriptors_complete;
+    uint8_t persisted_endpoint_count = descriptors_complete ? d->endpoint_count : 0;
+
     nvs_dev_hdr_t hdr = {
         .cache_ver           = NVS_CACHE_VERSION,
         .ieee_addr           = d->ieee_addr,
@@ -80,8 +84,8 @@ static size_t serialise(uint8_t idx)
         .manufacturer_code   = d->manufacturer_code,
         .power_desc_flags    = d->power_desc_flags,
         .power_source        = d->power_source,
-        .endpoint_count      = d->endpoint_count,
-        .reporting_configured= d->reporting_configured,
+        .endpoint_count      = persisted_endpoint_count,
+        .reporting_configured= reporting_configured,
     };
     strncpy(hdr.friendly_name, d->friendly_name, FRIENDLY_NAME_LEN);
     strncpy(hdr.manufacturer,  d->manufacturer,  32);
@@ -90,7 +94,7 @@ static size_t serialise(uint8_t idx)
     memcpy(p, &hdr, sizeof(hdr));
     p += sizeof(hdr);
 
-    for (int e = 0; e < d->endpoint_count && e < MAX_ENDPOINTS; e++) {
+    for (int e = 0; e < persisted_endpoint_count && e < MAX_ENDPOINTS; e++) {
         endpoint_record_t *ep = &d->endpoints[e];
         nvs_ep_hdr_t ehdr = {
             .endpoint_id     = ep->endpoint_id,
@@ -158,16 +162,12 @@ static bool deserialise(const uint8_t *blob, size_t len)
     d->manufacturer_code    = hdr->manufacturer_code;
     d->power_desc_flags     = hdr->power_desc_flags;
     d->power_source         = hdr->power_source;
-    d->reporting_configured = hdr->reporting_configured;
-    d->endpoint_count       = (hdr->endpoint_count < MAX_ENDPOINTS)
-                               ? hdr->endpoint_count : MAX_ENDPOINTS;
+    bool cache_reporting_configured = hdr->reporting_configured;
+    uint8_t saved_endpoint_count = (hdr->endpoint_count < MAX_ENDPOINTS)
+                                    ? hdr->endpoint_count : MAX_ENDPOINTS;
+    d->reporting_configured = cache_reporting_configured;
+    d->endpoint_count       = 0;
     d->is_sleepy            = !(hdr->mac_capability_flags & 0x08);
-
-    // Restore state as INTERVIEWED (we know descriptors, just need runtime contact)
-    if (d->state < DEV_STATE_INTERVIEWED) {
-        d->state = d->reporting_configured ? DEV_STATE_CONFIGURED
-                                           : DEV_STATE_INTERVIEWED;
-    }
 
     // Online=false until we hear from the device
     d->online = false;
@@ -175,14 +175,14 @@ static bool deserialise(const uint8_t *blob, size_t len)
 
     p += sizeof(nvs_dev_hdr_t);
 
-    // Restore endpoints
-    for (int e = 0; e < d->endpoint_count; e++) {
+    // Restore endpoints. If the blob is truncated, keep only complete entries.
+    for (int e = 0; e < saved_endpoint_count; e++) {
         if ((size_t)(p - blob) + sizeof(nvs_ep_hdr_t) > len) break;
 
         const nvs_ep_hdr_t *ehdr = (const nvs_ep_hdr_t *)p;
         p += sizeof(nvs_ep_hdr_t);
 
-        endpoint_record_t *ep = &d->endpoints[e];
+        endpoint_record_t *ep = &d->endpoints[d->endpoint_count];
         ep->endpoint_id      = ehdr->endpoint_id;
         ep->profile_id       = ehdr->profile_id;
         ep->device_id        = ehdr->device_id;
@@ -216,6 +216,26 @@ static bool deserialise(const uint8_t *blob, size_t len)
             ep->bindings[b].dst_endpoint = bhdr->dst_endpoint;
             p += sizeof(nvs_binding_t);
         }
+
+        d->endpoint_count++;
+    }
+
+    bool descriptors_valid =
+        (d->endpoint_count == saved_endpoint_count &&
+         dm_has_complete_descriptors(d));
+    if (!descriptors_valid) {
+        if (cache_reporting_configured) {
+            char ibuf[20];
+            utils_ieee_to_str(hdr->ieee_addr, ibuf, sizeof(ibuf));
+            ZB_LOG("NVS cache: %s descriptors incomplete; forcing re-interview",
+                   ibuf);
+        }
+        d->reporting_configured = false;
+        d->state = DEV_STATE_NEW;
+        d->dirty = true;
+    } else if (d->state < DEV_STATE_INTERVIEWED) {
+        d->state = d->reporting_configured ? DEV_STATE_CONFIGURED
+                                           : DEV_STATE_INTERVIEWED;
     }
 
     return true;

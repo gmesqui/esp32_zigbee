@@ -54,8 +54,8 @@ void app_main(void)
     dm_init();
 
     // 6. Load persisted device table from NVS
-    //    Devices are restored with state=INTERVIEWED, online=false.
-    //    They become online again when we receive traffic from them.
+    //    Devices with complete descriptors are restored as interviewed/configured.
+    //    Incomplete cache entries are kept as NEW so they are re-interviewed.
     if (nvs_cache_load()) {
         ZB_LOG("Device cache loaded: %u device(s)", dm_count());
     } else {

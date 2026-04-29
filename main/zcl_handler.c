@@ -675,6 +675,16 @@ esp_err_t zcl_on_report_attr(const esp_zb_zcl_report_attr_message_t *msg)
                       msg->attribute.id, msg->attribute.data.type,
                       msg->attribute.data.value, true);
 
+    if (!dm_has_complete_descriptors(dev) ||
+        dev->state == DEV_STATE_NEW ||
+        dev->state == DEV_STATE_FAILED) {
+        ZB_LOG("INTERVIEW %s enqueue from attribute report (state=%s eps=%u)",
+               dm_display_name(dev),
+               utils_device_state_name((int)dev->state),
+               dev->endpoint_count);
+        di_enqueue(dev);
+    }
+
     rc_configure_pending_sleepy_now(dev, "attribute_report");
     maybe_probe_sleepy_device(dev, src_ep, cluster, msg->attribute.id);
 

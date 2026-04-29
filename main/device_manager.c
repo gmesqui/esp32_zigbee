@@ -322,6 +322,29 @@ bool dm_has_in_cluster(const device_record_t *dev, uint16_t cluster_id,
     return false;
 }
 
+bool dm_has_complete_descriptors(const device_record_t *dev)
+{
+    if (!dev || dev->endpoint_count == 0 || dev->endpoint_count > MAX_ENDPOINTS) {
+        return false;
+    }
+
+    for (uint8_t e = 0; e < dev->endpoint_count; e++) {
+        const endpoint_record_t *ep = &dev->endpoints[e];
+        if (ep->endpoint_id == 0 || ep->profile_id == 0) {
+            return false;
+        }
+        if (ep->in_cluster_count > MAX_CLUSTERS_PER_EP ||
+            ep->out_cluster_count > MAX_CLUSTERS_PER_EP) {
+            return false;
+        }
+        if ((ep->in_cluster_count + ep->out_cluster_count) == 0) {
+            return false;
+        }
+    }
+
+    return true;
+}
+
 void dm_clear_bindings(device_record_t *dev)
 {
     if (!dev) return;

@@ -467,7 +467,7 @@ static bool device_can_configure_reporting_now(const device_record_t *dev)
     return dev &&
            !dev->reporting_configured &&
            !dev->report_cfg_in_progress &&
-           dev->endpoint_count > 0 &&
+           dm_has_complete_descriptors(dev) &&
            dev->state >= DEV_STATE_INTERVIEWED;
 }
 
@@ -590,7 +590,8 @@ void esp_zb_app_signal_handler(esp_zb_app_signal_t *signal_struct)
                 dm_set_online(dev, true);
 
                 bool needs_interview =
-                    (dev->state == DEV_STATE_NEW ||
+                    (!dm_has_complete_descriptors(dev) ||
+                     dev->state == DEV_STATE_NEW ||
                      dev->state == DEV_STATE_FAILED);
 
                 dm_unlock();
@@ -674,7 +675,13 @@ void esp_zb_app_signal_handler(esp_zb_app_signal_t *signal_struct)
                 dm_set_online(dev, true);
             }
             dm_unlock();
-            configure_reporting_from_awake_window(dev, "device_update");
+            if (dev && (!dm_has_complete_descriptors(dev) ||
+                        dev->state == DEV_STATE_NEW ||
+                        dev->state == DEV_STATE_FAILED)) {
+                di_enqueue(dev);
+            } else {
+                configure_reporting_from_awake_window(dev, "device_update");
+            }
             break;
         }
 

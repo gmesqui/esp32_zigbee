@@ -448,6 +448,24 @@ size_t rc_configure_device(device_record_t *dev)
 {
     if (!dev) return 0;
 
+    if (!dm_has_complete_descriptors(dev)) {
+        ZB_LOG("REPORT_CFG skip %s: incomplete descriptors, re-interview required",
+               dm_display_name(dev));
+        dev->report_cfg_expected = 0;
+        dev->report_cfg_received = 0;
+        dev->report_cfg_failed = 0;
+        dev->report_cfg_in_progress = false;
+        dev->report_cfg_started_ms = 0;
+        if (dev->reporting_configured) {
+            dev->reporting_configured = false;
+            dev->dirty = true;
+        }
+        if (dev->state == DEV_STATE_CONFIGURED) {
+            dev->state = DEV_STATE_NEW;
+        }
+        return 0;
+    }
+
     ZB_LOG("REPORT_CFG start for %s (%s)",
            dm_display_name(dev), dev->is_sleepy ? "sleepy" : "always-on");
 
@@ -517,7 +535,8 @@ size_t rc_configure_device(device_record_t *dev)
     dev->report_cfg_failed = 0;
     dev->report_cfg_in_progress = (configured_count > 0);
     dev->report_cfg_started_ms = dev->report_cfg_in_progress ? utils_uptime_ms() : 0;
-    bool reporting_configured = (configured_count == 0);
+    bool reporting_configured =
+        (configured_count == 0 && dm_has_complete_descriptors(dev));
     if (dev->reporting_configured != reporting_configured) {
         dev->reporting_configured = reporting_configured;
         dev->dirty = true;
@@ -740,7 +759,8 @@ void rc_on_config_resp(const esp_zb_zcl_cmd_config_report_resp_message_t *msg)
         if (dev->report_cfg_received >= dev->report_cfg_expected) {
             dev->report_cfg_in_progress = false;
             dev->report_cfg_started_ms = 0;
-            bool reporting_configured = (dev->report_cfg_failed == 0);
+            bool reporting_configured =
+                (dev->report_cfg_failed == 0 && dm_has_complete_descriptors(dev));
             if (dev->reporting_configured != reporting_configured) {
                 dev->reporting_configured = reporting_configured;
                 dev->dirty = true;

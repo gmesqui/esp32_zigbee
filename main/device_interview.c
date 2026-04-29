@@ -160,7 +160,8 @@ static void interview_finish_reporting_validation(uint8_t dev_idx, bool timed_ou
         rc_mark_reporting_timeout(dev);
     }
 
-    if (!dev->report_cfg_in_progress &&
+    if (dm_has_complete_descriptors(dev) &&
+        !dev->report_cfg_in_progress &&
         dev->report_cfg_received == dev->report_cfg_expected &&
         dev->report_cfg_failed == 0 &&
         dev->reporting_configured) {
@@ -470,7 +471,15 @@ static void interview_done(uint8_t dev_idx, bool reporting_validated)
 {
     device_record_t *dev = dm_get_by_index(dev_idx);
     if (dev) {
-        dev->state = reporting_validated ? DEV_STATE_CONFIGURED : DEV_STATE_INTERVIEWED;
+        bool descriptors_complete = dm_has_complete_descriptors(dev);
+        if (!descriptors_complete) {
+            reporting_validated = false;
+            dev->reporting_configured = false;
+            dev->state = DEV_STATE_FAILED;
+            dev->dirty = true;
+        } else {
+            dev->state = reporting_validated ? DEV_STATE_CONFIGURED : DEV_STATE_INTERVIEWED;
+        }
         // Save immediately after interview
         nvs_cache_save_device(dev_idx);
         ZB_LOG("INTERVIEW %s COMPLETE (eps=%u mfr=%s model=%s %s reporting=%s)",
@@ -478,13 +487,15 @@ static void interview_done(uint8_t dev_idx, bool reporting_validated)
                dev->manufacturer[0] ? dev->manufacturer : "?",
                dev->model[0]        ? dev->model        : "?",
                dev->is_sleepy       ? "sleepy"          : "always-on",
-               reporting_validated  ? "validated"       : "partial");
+               reporting_validated  ? "validated"       :
+               descriptors_complete ? "partial"         : "invalid");
 
         zb_event_t evt = {
             .type             = ZB_EVT_INTERVIEW,
             .ieee             = dev->ieee_addr,
             .online           = true,
-            .interview_status = reporting_validated ? "successful" : "partial",
+            .interview_status = reporting_validated  ? "successful" :
+                                descriptors_complete ? "partial" : "failed",
         };
         strncpy(evt.friendly_name, dev->friendly_name, ZB_EVT_NAME_LEN - 1);
         zb_events_emit(&evt);
@@ -498,7 +509,9 @@ static void interview_done(uint8_t dev_idx, bool reporting_validated)
         strncpy(avail_evt.friendly_name, dev->friendly_name, ZB_EVT_NAME_LEN - 1);
         zb_events_emit(&avail_evt);
 
-        request_binding_table(dev, 0);
+        if (descriptors_complete) {
+            request_binding_table(dev, 0);
+        }
     }
     g_ictx.ieee_addr = 0;
     g_ictx.state = ISTATE_IDLE;
@@ -738,6 +751,23 @@ void di_trigger_ieee_resolve(uint16_t nwk_addr)
 void di_startup_probe_known_devices(void)
 {
     if (g_probe_ctx.active) return;
+
+    for (uint8_t idx = 0; idx < MAX_DEVICES; idx++) {
+        device_record_t *dev = dm_get_by_index(idx);
+        if (!dev || !dev->in_use || dev->is_sleepy) {
+            continue;
+        }
+        if (!dm_has_complete_descriptors(dev) ||
+            dev->state == DEV_STATE_NEW ||
+            dev->state == DEV_STATE_FAILED) {
+            ZB_LOG("STARTUP_REPAIR %s enqueue interview (state=%s eps=%u)",
+                   dm_display_name(dev),
+                   utils_device_state_name((int)dev->state),
+                   dev->endpoint_count);
+            di_enqueue(dev);
+        }
+    }
+
     startup_probe_schedule_next((uint8_t)-1);
 }
 
@@ -799,7 +829,7 @@ void di_on_ieee_addr_resp(esp_zb_zdp_status_t zdo_status,
         zcl_pending_attr_replay(ieee, nwk_addr);
 
         if (!dev->reporting_configured && !dev->report_cfg_in_progress &&
-            dev->endpoint_count > 0 && dev->state >= DEV_STATE_INTERVIEWED) {
+            dm_has_complete_descriptors(dev) && dev->state >= DEV_STATE_INTERVIEWED) {
             ZB_LOG("REPORT_CFG awake window for %s reason=ieee_resolve: "
                    "immediate configure",
                    dm_display_name(dev));

@@ -216,6 +216,10 @@ void dm_unlock(void);
 bool dm_has_in_cluster(const device_record_t *dev, uint16_t cluster_id,
                         uint8_t *ep_out);
 
+/** Returns true when the cached interview descriptors are complete enough
+ *  to route reads, commands and reporting configuration safely. */
+bool dm_has_complete_descriptors(const device_record_t *dev);
+
 /** Clear all stored bindings for a device. */
 void dm_clear_bindings(device_record_t *dev);
 
