@@ -8,11 +8,21 @@
 #include "esp_eth.h"
 #include "esp_mac.h"
 #include "esp_eth_mac_spi.h"
+#include "esp_eth_spec.h"
 #include "driver/spi_master.h"
 #include "driver/gpio.h"
 #include "mdns.h"
 #include "esp_heap_caps.h"
+#include "esp_memory_utils.h"
 #include <stdio.h>
+#include <stdlib.h>
+#include <string.h>
+
+#define W5500_SPI_LOCK_TIMEOUT_MS 50
+#define W5500_BSB_OFFSET          3
+#define W5500_BSB_SOCK_TX_BUF_0   2
+#define W5500_SPI_DMA_ALIGN       4
+#define W5500_TX_DMA_BUF_SIZE     ((ETH_MAX_PACKET_SIZE + W5500_SPI_DMA_ALIGN - 1u) & ~(W5500_SPI_DMA_ALIGN - 1u))
 
 // ---------------------------------------------------------------------------
 // Module state
@@ -21,6 +31,160 @@ static EventGroupHandle_t s_eth_eg;
 static bool s_mdns_ready;
 static eth_driver_status_t s_status;
 static portMUX_TYPE s_status_lock = portMUX_INITIALIZER_UNLOCKED;
+
+typedef struct {
+    spi_host_device_t host;
+    const spi_device_interface_config_t *devcfg;
+} w5500_spi_dma_config_t;
+
+typedef struct {
+    spi_device_handle_t hdl;
+    SemaphoreHandle_t lock;
+    uint8_t *tx_dma_buf;
+} w5500_spi_dma_ctx_t;
+
+static bool w5500_is_tx_buffer_write(uint32_t addr)
+{
+    return ((addr >> W5500_BSB_OFFSET) & 0x1Fu) == W5500_BSB_SOCK_TX_BUF_0;
+}
+
+static void *w5500_spi_dma_init(const void *spi_config)
+{
+    const w5500_spi_dma_config_t *cfg = (const w5500_spi_dma_config_t *)spi_config;
+    if (!cfg || !cfg->devcfg) {
+        return NULL;
+    }
+
+    w5500_spi_dma_ctx_t *spi = calloc(1u, sizeof(*spi));
+    if (!spi) {
+        return NULL;
+    }
+
+    spi_device_interface_config_t devcfg = *cfg->devcfg;
+    esp_err_t err = spi_bus_add_device(cfg->host, &devcfg, &spi->hdl);
+    if (err != ESP_OK) {
+        ZB_LOG("ETH: W5500 SPI add device failed (%s)", esp_err_to_name(err));
+        free(spi);
+        return NULL;
+    }
+
+    spi->lock = xSemaphoreCreateMutex();
+    if (!spi->lock) {
+        spi_bus_remove_device(spi->hdl);
+        free(spi);
+        return NULL;
+    }
+
+    spi->tx_dma_buf = heap_caps_aligned_alloc(W5500_SPI_DMA_ALIGN,
+                                              W5500_TX_DMA_BUF_SIZE,
+                                              MALLOC_CAP_DMA | MALLOC_CAP_INTERNAL);
+    if (!spi->tx_dma_buf) {
+        ZB_LOG("ETH: no DMA heap for W5500 TX staging buffer size=%u free_dma=%u largest_dma=%u",
+               (unsigned)W5500_TX_DMA_BUF_SIZE,
+               (unsigned)heap_caps_get_free_size(MALLOC_CAP_DMA | MALLOC_CAP_INTERNAL),
+               (unsigned)heap_caps_get_largest_free_block(MALLOC_CAP_DMA | MALLOC_CAP_INTERNAL));
+        vSemaphoreDelete(spi->lock);
+        spi_bus_remove_device(spi->hdl);
+        free(spi);
+        return NULL;
+    }
+
+    return spi;
+}
+
+static esp_err_t w5500_spi_dma_deinit(void *spi_ctx)
+{
+    w5500_spi_dma_ctx_t *spi = (w5500_spi_dma_ctx_t *)spi_ctx;
+    if (!spi) {
+        return ESP_OK;
+    }
+
+    if (spi->hdl) {
+        spi_bus_remove_device(spi->hdl);
+    }
+    if (spi->lock) {
+        vSemaphoreDelete(spi->lock);
+    }
+    free(spi->tx_dma_buf);
+    free(spi);
+    return ESP_OK;
+}
+
+static esp_err_t w5500_spi_dma_write(void *spi_ctx, uint32_t cmd, uint32_t addr,
+                                     const void *data, uint32_t data_len)
+{
+    w5500_spi_dma_ctx_t *spi = (w5500_spi_dma_ctx_t *)spi_ctx;
+    if (!spi || !data || data_len == 0) {
+        return ESP_ERR_INVALID_ARG;
+    }
+
+    const void *tx_buffer = data;
+    uint32_t tx_len = data_len;
+
+    if (w5500_is_tx_buffer_write(addr)) {
+        if (data_len > ETH_MAX_PACKET_SIZE) {
+            return ESP_ERR_INVALID_SIZE;
+        }
+        memcpy(spi->tx_dma_buf, data, data_len);
+        tx_buffer = spi->tx_dma_buf;
+        tx_len = (data_len + W5500_SPI_DMA_ALIGN - 1u) & ~(W5500_SPI_DMA_ALIGN - 1u);
+        if (tx_len > data_len) {
+            memset(spi->tx_dma_buf + data_len, 0, tx_len - data_len);
+        }
+    }
+
+    spi_transaction_t trans = {
+        .cmd = cmd,
+        .addr = addr,
+        .length = 8u * tx_len,
+        .tx_buffer = tx_buffer,
+    };
+
+    if (xSemaphoreTake(spi->lock, pdMS_TO_TICKS(W5500_SPI_LOCK_TIMEOUT_MS)) != pdTRUE) {
+        return ESP_ERR_TIMEOUT;
+    }
+
+    esp_err_t err = spi_device_polling_transmit(spi->hdl, &trans);
+    xSemaphoreGive(spi->lock);
+    if (err != ESP_OK) {
+        ZB_LOG("ETH: W5500 SPI write failed len=%lu tx_len=%lu tx_dma=%u free_dma=%u largest_dma=%u err=%s",
+               (unsigned long)data_len,
+               (unsigned long)tx_len,
+               (unsigned)esp_ptr_dma_capable(tx_buffer),
+               (unsigned)heap_caps_get_free_size(MALLOC_CAP_DMA | MALLOC_CAP_INTERNAL),
+               (unsigned)heap_caps_get_largest_free_block(MALLOC_CAP_DMA | MALLOC_CAP_INTERNAL),
+               esp_err_to_name(err));
+    }
+    return err;
+}
+
+static esp_err_t w5500_spi_dma_read(void *spi_ctx, uint32_t cmd, uint32_t addr,
+                                    void *data, uint32_t data_len)
+{
+    w5500_spi_dma_ctx_t *spi = (w5500_spi_dma_ctx_t *)spi_ctx;
+    if (!spi || !data || data_len == 0) {
+        return ESP_ERR_INVALID_ARG;
+    }
+
+    spi_transaction_t trans = {
+        .flags = data_len <= 4u ? SPI_TRANS_USE_RXDATA : 0,
+        .cmd = cmd,
+        .addr = addr,
+        .length = 8u * data_len,
+        .rx_buffer = data,
+    };
+
+    if (xSemaphoreTake(spi->lock, pdMS_TO_TICKS(W5500_SPI_LOCK_TIMEOUT_MS)) != pdTRUE) {
+        return ESP_ERR_TIMEOUT;
+    }
+
+    esp_err_t err = spi_device_polling_transmit(spi->hdl, &trans);
+    xSemaphoreGive(spi->lock);
+    if (err == ESP_OK && (trans.flags & SPI_TRANS_USE_RXDATA)) {
+        memcpy(data, trans.rx_data, data_len);
+    }
+    return err;
+}
 
 static void status_set_str(char *dst, size_t dst_len, const char *src)
 {
@@ -215,12 +379,22 @@ EventGroupHandle_t eth_driver_init(void)
         .clock_speed_hz   = ETH_SPI_CLOCK_HZ,
         .input_delay_ns   = 0,
         .spics_io_num     = ETH_CS_GPIO,
-        .queue_size       = 20,
+        .queue_size       = 4,
+    };
+
+    w5500_spi_dma_config_t spi_dma_cfg = {
+        .host = ETH_SPI_HOST,
+        .devcfg = &spi_devcfg,
     };
 
     // 7. W5500 MAC config
     eth_w5500_config_t w5500_cfg = ETH_W5500_DEFAULT_CONFIG(ETH_SPI_HOST, &spi_devcfg);
     w5500_cfg.int_gpio_num = ETH_INT_GPIO;
+    w5500_cfg.custom_spi_driver.config = &spi_dma_cfg;
+    w5500_cfg.custom_spi_driver.init = w5500_spi_dma_init;
+    w5500_cfg.custom_spi_driver.deinit = w5500_spi_dma_deinit;
+    w5500_cfg.custom_spi_driver.read = w5500_spi_dma_read;
+    w5500_cfg.custom_spi_driver.write = w5500_spi_dma_write;
 
     eth_mac_config_t mac_cfg = ETH_MAC_DEFAULT_CONFIG();
     mac_cfg.rx_task_stack_size = 4096;
