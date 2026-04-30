@@ -71,14 +71,8 @@ export class ZigbeeDeviceAccessory {
     this.ensureLastKnown(normalized.device_id);
 
     const current = this.accessory.context.lastKnown!;
-    current.meta = {
-      ...current.meta,
-      ...normalized.meta,
-    };
-    current.state = {
-      ...current.state,
-      ...normalized.state,
-    };
+    current.meta = normalized.meta ?? {};
+    current.state = normalized.state ?? {};
 
     this.applyMeta(current.meta);
     this.applyState(current.state);

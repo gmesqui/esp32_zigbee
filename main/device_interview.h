@@ -52,6 +52,16 @@ void di_forget_device(uint8_t dev_idx, uint64_t ieee);
  *  updated the validation session for the given device. */
 void di_on_reporting_config_response(device_record_t *dev);
 
+/** Consume a raw ZDO Active_EP_rsp seen on APS when the SDK callback times
+ *  out or cannot correlate the response. Returns true when it advanced the
+ *  active interview. */
+bool di_on_active_ep_raw(uint16_t src_nwk, const uint8_t *asdu, uint8_t len);
+
+/** Consume a raw ZDO Simple_Desc_rsp seen on APS when the SDK callback times
+ *  out or cannot correlate the response. Returns true when it advanced the
+ *  active interview. */
+bool di_on_simple_desc_raw(uint16_t src_nwk, const uint8_t *asdu, uint8_t len);
+
 // ---------------------------------------------------------------------------
 // ZDO response callbacks — registered with the SDK and called from Zigbee
 // task context.  Signatures match the esp_zb_zdo_*_callback_t typedefs.

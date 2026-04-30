@@ -122,21 +122,143 @@ static void append_capabilities(char **p, char *end, const device_record_t *dev)
     ws_json_append(p, end, "]");
 }
 
+static void append_cluster_array(char **p, char *end, const char *name,
+                                 const uint16_t *clusters, uint8_t count)
+{
+    ws_json_append_string(p, end, name);
+    ws_json_append(p, end, ":[");
+    for (uint8_t i = 0; i < count; i++) {
+        if (i > 0) {
+            ws_json_append(p, end, ",");
+        }
+        ws_json_append(p, end, "%u", clusters[i]);
+    }
+    ws_json_append(p, end, "]");
+}
+
+static const char *report_cfg_reason(uint8_t result)
+{
+    switch ((report_cfg_result_t)result) {
+        case REPORT_CFG_RESULT_FAIL:
+            return "fail";
+        case REPORT_CFG_RESULT_MISSING:
+            return "missing";
+        case REPORT_CFG_RESULT_BIND_FAIL:
+            return "bind_fail";
+        case REPORT_CFG_RESULT_WRITE_FAIL:
+            return "write_fail";
+        case REPORT_CFG_RESULT_UNSUPPORTED:
+            return "unsupported";
+        default:
+            return "unknown";
+    }
+}
+
+static void append_reporting_failures(char **p, char *end,
+                                      const device_record_t *dev)
+{
+    bool first = true;
+
+    ws_json_append(p, end, "\"failures\":[");
+    for (uint8_t i = 0; i < dev->report_cfg_record_count; i++) {
+        const report_cfg_record_t *record = &dev->report_cfg_records[i];
+        if (record->result != REPORT_CFG_RESULT_FAIL &&
+            record->result != REPORT_CFG_RESULT_MISSING &&
+            record->result != REPORT_CFG_RESULT_BIND_FAIL &&
+            record->result != REPORT_CFG_RESULT_WRITE_FAIL &&
+            record->result != REPORT_CFG_RESULT_UNSUPPORTED) {
+            continue;
+        }
+        if (!first) {
+            ws_json_append(p, end, ",");
+        }
+        first = false;
+        ws_json_append(p, end,
+                       "{\"endpoint\":%u,\"cluster_id\":%u,"
+                       "\"attr_id\":%u,\"status\":%u,\"reason\":",
+                       record->endpoint, record->cluster_id,
+                       record->attr_id, record->status);
+        ws_json_append_string(p, end, report_cfg_reason(record->result));
+        ws_json_append(p, end, ",\"cluster_name\":");
+        ws_json_append_string(p, end, utils_cluster_name(record->cluster_id));
+        ws_json_append(p, end, "}");
+    }
+    ws_json_append(p, end, "],\"overflow\":%s",
+                   dev->report_cfg_record_overflow ? "true" : "false");
+}
+
+static void append_endpoints(char **p, char *end, const device_record_t *dev)
+{
+    ws_json_append(p, end, "\"endpoints\":[");
+    for (uint8_t i = 0; i < dev->endpoint_count; i++) {
+        const endpoint_record_t *ep = &dev->endpoints[i];
+        if (i > 0) {
+            ws_json_append(p, end, ",");
+        }
+        ws_json_append(p, end,
+                       "{\"id\":%u,\"profile_id\":%u,\"device_id\":%u,"
+                       "\"device_type\":",
+                       ep->endpoint_id, ep->profile_id, ep->device_id);
+        ws_json_append_string(p, end, utils_device_type_name(ep->device_id));
+        ws_json_append(p, end, ",");
+        append_cluster_array(p, end, "in_clusters",
+                             ep->in_clusters, ep->in_cluster_count);
+        ws_json_append(p, end, ",");
+        append_cluster_array(p, end, "out_clusters",
+                             ep->out_clusters, ep->out_cluster_count);
+        ws_json_append(p, end, "}");
+    }
+    ws_json_append(p, end, "]");
+}
+
 void ws_model_append_inventory_device(char **p, char *end,
                                       const device_record_t *dev)
 {
+    uint32_t last_seen = dev->last_seen_ms / 1000u;
+
     ws_json_append(p, end, "{");
     ws_json_append(p, end, "\"device_id\":");
     ws_model_append_device_id(p, end, dev->ieee_addr);
     ws_json_append(p, end, ",\"name\":");
     ws_json_append_string(p, end, dm_display_name(dev));
+    ws_json_append(p, end, ",\"nwk\":%u,\"online\":%s,\"is_sleepy\":%s,"
+                   "\"state\":",
+                   dev->nwk_addr, dev->online ? "true" : "false",
+                   dev->is_sleepy ? "true" : "false");
+    ws_json_append_string(p, end, utils_device_state_name((int)dev->state));
     ws_json_append(p, end, ",\"manufacturer\":");
     ws_json_append_string(p, end, dev->manufacturer);
     ws_json_append(p, end, ",\"model\":");
     ws_json_append_string(p, end, dev->model);
     ws_json_append(p, end, ",\"power_source\":");
     ws_json_append_string(p, end, utils_power_source_name(dev->power_source));
-    ws_json_append(p, end, ",\"is_sleepy\":%s", dev->is_sleepy ? "true" : "false");
+    ws_json_append(p, end,
+                   ",\"last_seen_s\":%lu,\"reporting\":{"
+                   "\"configured\":%s,\"in_progress\":%s,"
+                   "\"expected\":%u,\"received\":%u,\"failed\":%u,",
+                   (unsigned long)last_seen,
+                   dev->reporting_configured ? "true" : "false",
+                   dev->report_cfg_in_progress ? "true" : "false",
+                   dev->report_cfg_expected,
+                   dev->report_cfg_received,
+                   dev->report_cfg_failed);
+    append_reporting_failures(p, end, dev);
+    ws_json_append(p, end,
+                   "},\"stats\":{\"report_attr_ok\":%lu,"
+                   "\"report_attr_unchanged\":%lu,"
+                   "\"read_rsp_ok\":%lu,\"read_rsp_fail\":%lu,"
+                   "\"interview_attempts\":%lu}",
+                   (unsigned long)dev->report_attr_ok,
+                   (unsigned long)dev->report_attr_unchanged,
+                   (unsigned long)dev->read_rsp_ok,
+                   (unsigned long)dev->read_rsp_fail,
+                   (unsigned long)dev->interview_attempts);
+    if (dev->radio_metrics_valid) {
+        ws_json_append(p, end, ",\"lqi\":%u,\"rssi\":%d",
+                       dev->last_lqi, (int)dev->last_rssi);
+    }
+    ws_json_append(p, end, ",");
+    append_endpoints(p, end, dev);
     ws_json_append(p, end, ",");
     append_capabilities(p, end, dev);
     ws_json_append(p, end, "}");

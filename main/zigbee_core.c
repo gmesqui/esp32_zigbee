@@ -419,6 +419,16 @@ static bool zb_aps_data_indication_handler(esp_zb_apsde_data_ind_t ind)
            ind.profile_id, utils_cluster_name(ind.cluster_id),
            (unsigned long)ind.asdu_length, ind.status,
            ind.security_status, ind.lqi, asdu_preview);
+    if (ind.profile_id == 0x0000 && ind.cluster_id == 0x8005 &&
+        ind.asdu && ind.asdu_length <= UINT8_MAX) {
+        di_on_active_ep_raw(ind.src_short_addr, ind.asdu,
+                            (uint8_t)ind.asdu_length);
+    }
+    if (ind.profile_id == 0x0000 && ind.cluster_id == 0x8004 &&
+        ind.asdu && ind.asdu_length <= UINT8_MAX) {
+        di_on_simple_desc_raw(ind.src_short_addr, ind.asdu,
+                              (uint8_t)ind.asdu_length);
+    }
     log_zcl_frame_preview(&ind, dev);
 
     return false;

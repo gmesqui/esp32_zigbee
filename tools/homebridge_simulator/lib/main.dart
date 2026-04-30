@@ -75,21 +75,18 @@ class _SimulatorScreenState extends State<SimulatorScreen> {
   bool get _canSend => _connected && _channel != null;
 
   List<_TrackedDevice> get _trackedDevices {
-    final deviceIds = <String>{
-      ..._inventoryById.keys,
-      ..._stateById.keys,
-    }.toList()
-      ..sort((left, right) {
-        final leftName =
-            (_inventoryById[left]?.name ?? left).toLowerCase();
-        final rightName =
-            (_inventoryById[right]?.name ?? right).toLowerCase();
-        final nameCompare = leftName.compareTo(rightName);
-        if (nameCompare != 0) {
-          return nameCompare;
-        }
-        return left.compareTo(right);
-      });
+    final deviceIds =
+        <String>{..._inventoryById.keys, ..._stateById.keys}.toList()
+          ..sort((left, right) {
+            final leftName = (_inventoryById[left]?.name ?? left).toLowerCase();
+            final rightName = (_inventoryById[right]?.name ?? right)
+                .toLowerCase();
+            final nameCompare = leftName.compareTo(rightName);
+            if (nameCompare != 0) {
+              return nameCompare;
+            }
+            return left.compareTo(right);
+          });
 
     return deviceIds
         .map(
@@ -228,7 +225,8 @@ class _SimulatorScreenState extends State<SimulatorScreen> {
     }
 
     final type = _asString(message['type']);
-    final data = _asStringKeyedMap(message['data']) ?? const <String, dynamic>{};
+    final data =
+        _asStringKeyedMap(message['data']) ?? const <String, dynamic>{};
 
     switch (type) {
       case 'inventory_chunk':
@@ -397,7 +395,9 @@ class _SimulatorScreenState extends State<SimulatorScreen> {
           ..addEntries(
             devices.map((device) => MapEntry(device.deviceId, device)),
           );
-        _stateById.removeWhere((deviceId, _) => !_inventoryById.containsKey(deviceId));
+        _stateById.removeWhere(
+          (deviceId, _) => !_inventoryById.containsKey(deviceId),
+        );
         _dropPendingForUnknownDevices();
       },
     );
@@ -414,6 +414,10 @@ class _SimulatorScreenState extends State<SimulatorScreen> {
           ..addEntries(
             devices.map((device) => MapEntry(device.deviceId, device)),
           );
+        for (final device in devices) {
+          _removePendingForDevice(device.deviceId);
+        }
+        _dropPendingForUnknownDevices();
       },
     );
   }
@@ -435,11 +439,11 @@ class _SimulatorScreenState extends State<SimulatorScreen> {
     final rawItems = data['devices'];
     final items = rawItems is List
         ? rawItems
-            .map((item) => _asStringKeyedMap(item))
-            .whereType<Map<String, dynamic>>()
-            .map(itemParser)
-            .whereType<T>()
-            .toList(growable: false)
+              .map((item) => _asStringKeyedMap(item))
+              .whereType<Map<String, dynamic>>()
+              .map(itemParser)
+              .whereType<T>()
+              .toList(growable: false)
         : <T>[];
 
     setState(() {
@@ -482,17 +486,18 @@ class _SimulatorScreenState extends State<SimulatorScreen> {
     setState(() {
       if (deviceId != null && deviceId.isNotEmpty) {
         final existingInventory = _inventoryById[deviceId];
-        final existingState = _stateById[deviceId] ??
-            _StateDeviceSnapshot.empty(deviceId);
+        final existingState =
+            _stateById[deviceId] ?? _StateDeviceSnapshot.empty(deviceId);
 
         if (type == 'device_joined' || type == 'device_updated') {
           final incomingName = _asString(data['name']);
-          _inventoryById[deviceId] = (existingInventory ??
-                  _InventoryDevice.placeholder(deviceId))
-              .copyWith(name: incomingName);
+          _inventoryById[deviceId] =
+              (existingInventory ?? _InventoryDevice.placeholder(deviceId))
+                  .copyWith(name: incomingName);
         }
 
         if (type == 'device_left') {
+          _removePendingForDevice(deviceId);
           _stateById[deviceId] = existingState.copyWith(
             meta: existingState.meta.copyWith(
               reachable: false,
@@ -511,6 +516,12 @@ class _SimulatorScreenState extends State<SimulatorScreen> {
         }
 
         if (type == 'event') {
+          final changes = _asStringKeyedMap(data['changes']);
+          if (changes != null &&
+              (changes.containsKey('state') ||
+                  changes.containsKey('reachable'))) {
+            _removePendingForDevice(deviceId);
+          }
           _stateById[deviceId] = _applyChangesToSnapshot(existingState, data);
         }
       }
@@ -592,7 +603,8 @@ class _SimulatorScreenState extends State<SimulatorScreen> {
       final status = _asString(data['status']);
       final applied = data['applied'] == true;
       if (status == 'ok' && applied) {
-        final snapshot = _stateById[pending.deviceId] ??
+        final snapshot =
+            _stateById[pending.deviceId] ??
             _StateDeviceSnapshot.empty(pending.deviceId);
         _stateById[pending.deviceId] = snapshot.copyWith(
           meta: snapshot.meta.copyWith(lastSeen: _protocolNow()),
@@ -642,7 +654,9 @@ class _SimulatorScreenState extends State<SimulatorScreen> {
 
   void _dropPendingForUnknownDevices() {
     final validIds = <String>{..._inventoryById.keys, ..._stateById.keys};
-    _pendingCommandsByDeviceId.removeWhere((deviceId, _) => !validIds.contains(deviceId));
+    _pendingCommandsByDeviceId.removeWhere(
+      (deviceId, _) => !validIds.contains(deviceId),
+    );
     _pendingCommandsByMsgId.removeWhere(
       (_, pending) => !validIds.contains(pending.deviceId),
     );
@@ -671,9 +685,7 @@ class _SimulatorScreenState extends State<SimulatorScreen> {
 
   Map<String, dynamic>? _asStringKeyedMap(Object? value) {
     if (value is Map) {
-      return value.map(
-        (key, item) => MapEntry(key.toString(), item),
-      );
+      return value.map((key, item) => MapEntry(key.toString(), item));
     }
     return null;
   }
@@ -1099,12 +1111,13 @@ class _SimulatorScreenState extends State<SimulatorScreen> {
                       return _DeviceTile(
                         device: device,
                         canSend: _canSend,
-                        onUseDeviceId: () => _loadDeviceIntoComposer(device.deviceId),
+                        onUseDeviceId: () =>
+                            _loadDeviceIntoComposer(device.deviceId),
                         onToggleSwitch: device.supportsSwitch
                             ? (value) => _sendDeviceStateCommand(
-                                  device.deviceId,
-                                  value,
-                                )
+                                device.deviceId,
+                                value,
+                              )
                             : null,
                       );
                     },
@@ -1278,10 +1291,7 @@ class _DeviceTile extends StatelessWidget {
             const SizedBox(height: 4),
             SelectableText(
               device.deviceId,
-              style: const TextStyle(
-                fontFamily: 'monospace',
-                fontSize: 12.5,
-              ),
+              style: const TextStyle(fontFamily: 'monospace', fontSize: 12.5),
             ),
             if (device.capabilities.isNotEmpty) ...[
               const SizedBox(height: 8),
@@ -1339,7 +1349,10 @@ class _DeviceTile extends StatelessWidget {
                 spacing: 8,
                 runSpacing: 8,
                 children: device.stateEntries
-                    .map((entry) => _StateChip(name: entry.key, value: entry.value))
+                    .map(
+                      (entry) =>
+                          _StateChip(name: entry.key, value: entry.value),
+                    )
                     .toList(growable: false),
               ),
             ],
@@ -1372,10 +1385,7 @@ class _Badge extends StatelessWidget {
         padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 5),
         child: Text(
           label,
-          style: TextStyle(
-            color: foregroundColor,
-            fontWeight: FontWeight.w600,
-          ),
+          style: TextStyle(color: foregroundColor, fontWeight: FontWeight.w600),
         ),
       ),
     );
@@ -1405,15 +1415,15 @@ class _StateChip extends StatelessWidget {
             Text(
               name,
               style: Theme.of(context).textTheme.labelMedium?.copyWith(
-                    color: Theme.of(context).colorScheme.onSurfaceVariant,
-                  ),
+                color: Theme.of(context).colorScheme.onSurfaceVariant,
+              ),
             ),
             const SizedBox(height: 2),
             Text(
               value.displayValue,
-              style: Theme.of(context).textTheme.bodyMedium?.copyWith(
-                    fontWeight: FontWeight.w600,
-                  ),
+              style: Theme.of(
+                context,
+              ).textTheme.bodyMedium?.copyWith(fontWeight: FontWeight.w600),
             ),
           ],
         ),
@@ -1540,9 +1550,9 @@ class _InventoryDevice {
 
     final capabilities = json['capabilities'] is List
         ? (json['capabilities'] as List)
-            .map((item) => item.toString())
-            .where((item) => item.isNotEmpty)
-            .toList(growable: false)
+              .map((item) => item.toString())
+              .where((item) => item.isNotEmpty)
+              .toList(growable: false)
         : const <String>[];
 
     return _InventoryDevice(
@@ -1614,9 +1624,7 @@ class _StateDeviceSnapshot {
       for (final entry in rawState.entries) {
         state[entry.key.toString()] = _AttributeValue.fromJson(
           entry.value is Map
-              ? entry.value.map(
-                  (key, value) => MapEntry(key.toString(), value),
-                )
+              ? entry.value.map((key, value) => MapEntry(key.toString(), value))
               : null,
         );
       }
@@ -1652,11 +1660,7 @@ class _StateDeviceSnapshot {
 }
 
 class _DeviceMetaState {
-  const _DeviceMetaState({
-    this.reachable,
-    this.lastSeen,
-    this.linkQuality,
-  });
+  const _DeviceMetaState({this.reachable, this.lastSeen, this.linkQuality});
 
   factory _DeviceMetaState.fromJson(Map<String, dynamic>? json) {
     if (json == null) {
@@ -1665,7 +1669,9 @@ class _DeviceMetaState {
 
     return _DeviceMetaState(
       reachable: json['reachable'] is bool ? json['reachable'] as bool : null,
-      lastSeen: json['last_seen'] is num ? (json['last_seen'] as num).toInt() : null,
+      lastSeen: json['last_seen'] is num
+          ? (json['last_seen'] as num).toInt()
+          : null,
       linkQuality: json['link_quality'] is num
           ? (json['link_quality'] as num).toInt()
           : null,
@@ -1789,10 +1795,10 @@ class _TrackedDevice {
   bool? get isReachable => snapshot?.meta.reachable;
 
   String get reachableLabel => switch (snapshot?.meta.reachable) {
-        true => 'Online',
-        false => 'Offline',
-        null => 'Sin reachability',
-      };
+    true => 'Online',
+    false => 'Offline',
+    null => 'Sin reachability',
+  };
 
   bool? get switchValue =>
       pendingCommand?.desiredState ?? snapshot?.state['state']?.boolValue;

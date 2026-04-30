@@ -937,6 +937,9 @@ void di_on_node_desc_resp(esp_zb_zdp_status_t zdo_status, uint16_t addr,
         !dev || dev->ieee_addr != g_ictx.ieee_addr) {
         return;
     }
+    if (g_ictx.state != ISTATE_NODE_DESC) {
+        return;
+    }
 
     if (zdo_status != ESP_ZB_ZDP_STATUS_SUCCESS || !node_desc) {
         ZB_LOG("INTERVIEW %s NODE_DESC FAILED status=0x%02X",
@@ -984,6 +987,9 @@ void di_on_power_desc_resp(esp_zb_zdo_power_desc_rsp_t *resp, void *user_ctx)
         !dev || dev->ieee_addr != g_ictx.ieee_addr) {
         return;
     }
+    if (g_ictx.state != ISTATE_POWER_DESC) {
+        return;
+    }
 
     if (!resp || resp->status != ESP_ZB_ZDP_STATUS_SUCCESS) {
         ZB_LOG("INTERVIEW %s POWER_DESC FAILED (non-fatal, continuing)",
@@ -1016,6 +1022,9 @@ void di_on_active_ep_resp(esp_zb_zdp_status_t zdo_status, uint8_t ep_count,
 
     if (!g_ictx.active || g_ictx.dev_idx != dev_idx ||
         !dev || dev->ieee_addr != g_ictx.ieee_addr) {
+        return;
+    }
+    if (g_ictx.state != ISTATE_ACTIVE_EP) {
         return;
     }
 
@@ -1058,6 +1067,129 @@ void di_on_active_ep_resp(esp_zb_zdp_status_t zdo_status, uint8_t ep_count,
     esp_zb_scheduler_alarm(alarm_start_step, dev_idx, 200);
 }
 
+bool di_on_active_ep_raw(uint16_t src_nwk, const uint8_t *asdu, uint8_t len)
+{
+    if (!asdu || len < 5 || !g_ictx.active || g_ictx.state != ISTATE_ACTIVE_EP) {
+        return false;
+    }
+
+    uint8_t status = asdu[1];
+    uint16_t rsp_nwk = (uint16_t)asdu[2] | ((uint16_t)asdu[3] << 8);
+    uint8_t ep_count = asdu[4];
+    if (status != ESP_ZB_ZDP_STATUS_SUCCESS ||
+        (uint16_t)len < (uint16_t)(5u + ep_count)) {
+        return false;
+    }
+
+    device_record_t *dev = dm_find_by_nwk(src_nwk);
+    if (!dev || dev->ieee_addr != g_ictx.ieee_addr || rsp_nwk != dev->nwk_addr) {
+        return false;
+    }
+
+    int idx = dm_index_of(dev);
+    if (idx < 0 || g_ictx.dev_idx != (uint8_t)idx) {
+        return false;
+    }
+
+    uint8_t ep_list[MAX_ENDPOINTS];
+    uint8_t cnt = ep_count;
+    if (cnt > MAX_ENDPOINTS) {
+        cnt = MAX_ENDPOINTS;
+    }
+    memcpy(ep_list, asdu + 5, cnt);
+
+    ZB_LOG("INTERVIEW %s ACTIVE_EP raw fallback count=%u",
+           dm_display_name(dev), cnt);
+    di_on_active_ep_resp(ESP_ZB_ZDP_STATUS_SUCCESS, cnt, ep_list,
+                         make_dev_ctx((uint8_t)idx));
+    return true;
+}
+
+bool di_on_simple_desc_raw(uint16_t src_nwk, const uint8_t *asdu, uint8_t len)
+{
+    if (!asdu || len < 12 || !g_ictx.active || g_ictx.state != ISTATE_SIMPLE_DESC) {
+        return false;
+    }
+
+    uint8_t status = asdu[1];
+    uint16_t rsp_nwk = (uint16_t)asdu[2] | ((uint16_t)asdu[3] << 8);
+    uint8_t desc_len = asdu[4];
+    if (status != ESP_ZB_ZDP_STATUS_SUCCESS ||
+        (uint16_t)len < (uint16_t)(5u + desc_len) ||
+        desc_len < 7) {
+        return false;
+    }
+
+    device_record_t *dev = dm_find_by_nwk(src_nwk);
+    if (!dev || dev->ieee_addr != g_ictx.ieee_addr || rsp_nwk != dev->nwk_addr) {
+        return false;
+    }
+
+    int idx = dm_index_of(dev);
+    if (idx < 0 || g_ictx.dev_idx != (uint8_t)idx ||
+        g_ictx.ep_cursor >= dev->endpoint_count) {
+        return false;
+    }
+
+    const uint8_t *desc = asdu + 5;
+    const uint8_t *end = desc + desc_len;
+    uint8_t endpoint = desc[0];
+    if (endpoint != dev->endpoints[g_ictx.ep_cursor].endpoint_id) {
+        return false;
+    }
+
+    esp_zb_af_simple_desc_1_1_t simple_desc = {0};
+    uint16_t clusters[MAX_CLUSTERS_PER_EP * 2] = {0};
+
+    simple_desc.endpoint = endpoint;
+    simple_desc.app_profile_id = (uint16_t)desc[1] | ((uint16_t)desc[2] << 8);
+    simple_desc.app_device_id = (uint16_t)desc[3] | ((uint16_t)desc[4] << 8);
+    simple_desc.app_device_version = desc[5];
+
+    const uint8_t *p = desc + 6;
+    uint8_t in_count = *p++;
+    if ((size_t)(end - p) < (size_t)in_count * sizeof(uint16_t) + 1u) {
+        return false;
+    }
+
+    uint8_t stored_in = in_count;
+    if (stored_in > MAX_CLUSTERS_PER_EP) {
+        stored_in = MAX_CLUSTERS_PER_EP;
+    }
+    for (uint8_t i = 0; i < in_count; i++) {
+        if (i < stored_in) {
+            clusters[i] = (uint16_t)p[0] | ((uint16_t)p[1] << 8);
+        }
+        p += sizeof(uint16_t);
+    }
+
+    uint8_t out_count = *p++;
+    if ((size_t)(end - p) < (size_t)out_count * sizeof(uint16_t)) {
+        return false;
+    }
+
+    uint8_t stored_out = out_count;
+    if (stored_out > MAX_CLUSTERS_PER_EP) {
+        stored_out = MAX_CLUSTERS_PER_EP;
+    }
+    for (uint8_t i = 0; i < out_count; i++) {
+        if (i < stored_out) {
+            clusters[stored_in + i] = (uint16_t)p[0] | ((uint16_t)p[1] << 8);
+        }
+        p += sizeof(uint16_t);
+    }
+
+    simple_desc.app_input_cluster_count = stored_in;
+    simple_desc.app_output_cluster_count = stored_out;
+    simple_desc.app_cluster_list = clusters;
+
+    ZB_LOG("INTERVIEW %s SIMPLE_DESC raw fallback ep=%u in=%u out=%u",
+           dm_display_name(dev), endpoint, stored_in, stored_out);
+    di_on_simple_desc_resp(ESP_ZB_ZDP_STATUS_SUCCESS, &simple_desc,
+                           make_dev_ctx((uint8_t)idx));
+    return true;
+}
+
 void di_on_simple_desc_resp(esp_zb_zdp_status_t zdo_status,
                              esp_zb_af_simple_desc_1_1_t *simple_desc,
                              void *user_ctx)
@@ -1069,6 +1201,9 @@ void di_on_simple_desc_resp(esp_zb_zdp_status_t zdo_status,
         !dev || dev->ieee_addr != g_ictx.ieee_addr) {
         return;
     }
+    if (g_ictx.state != ISTATE_SIMPLE_DESC) {
+        return;
+    }
 
     if (zdo_status != ESP_ZB_ZDP_STATUS_SUCCESS || !simple_desc) {
         ZB_LOG("INTERVIEW %s SIMPLE_DESC ep_cursor=%u FAILED status=0x%02X",
@@ -1077,6 +1212,11 @@ void di_on_simple_desc_resp(esp_zb_zdp_status_t zdo_status,
         // Skip failed endpoint, continue with next
         g_ictx.ep_cursor++;
         esp_zb_scheduler_alarm(alarm_start_step, dev_idx, 200);
+        return;
+    }
+
+    if (g_ictx.ep_cursor >= dev->endpoint_count ||
+        simple_desc->endpoint != dev->endpoints[g_ictx.ep_cursor].endpoint_id) {
         return;
     }
 
