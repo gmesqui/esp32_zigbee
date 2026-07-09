@@ -202,14 +202,28 @@ app.patch('/api/series/:id', (req, res) => {
 app.delete('/api/series/:id', (req, res) => { const id = Number(req.params.id); db.prepare('DELETE FROM readings WHERE series_id = ?').run(id); db.prepare('DELETE FROM series WHERE id = ?').run(id); res.status(204).end(); });
 
 app.get('/api/history', (req, res) => {
-  const id = Number(req.query.seriesId); const hours = Math.min(Math.max(Number(req.query.hours) || 24, 1), 24 * 365);
+  const id = Number(req.query.seriesId);
+  const hasFrom = req.query.from !== undefined;
+  const hasTo = req.query.to !== undefined;
+  if (hasFrom !== hasTo) return res.status(400).json({ error: 'from y to deben indicarse juntos.' });
+  let from, to;
+  if (hasFrom) {
+    from = Number(req.query.from); to = Number(req.query.to);
+    if (!Number.isFinite(from) || !Number.isFinite(to) || from >= to) return res.status(400).json({ error: 'El rango historico no es valido.' });
+    from = Math.round(from); to = Math.round(to);
+  } else {
+    const hours = Math.min(Math.max(Number(req.query.hours) || 24, 1), 24 * 365);
+    to = now(); from = to - hours * 3_600_000;
+  }
   if (!Number.isInteger(id)) return res.status(400).json({ error: 'seriesId inválido.' });
-  const from = now() - hours * 3_600_000;
   const series = db.prepare('SELECT * FROM series WHERE id = ?').get(id); if (!series) return res.status(404).json({ error: 'Serie no encontrada.' });
-  const readings = db.prepare('SELECT captured_at, value_json, numeric_value, unit, source FROM readings WHERE series_id = ? AND captured_at >= ? ORDER BY captured_at').all(id, from)
+  const readings = db.prepare('SELECT captured_at, value_json, numeric_value, unit, source FROM readings WHERE series_id = ? AND captured_at >= ? AND captured_at < ? ORDER BY captured_at').all(id, from, to)
     .map(row => ({ ...row, value: JSON.parse(row.value_json) }));
+  const decodeReading = row => row ? { ...row, value: JSON.parse(row.value_json) } : null;
+  const previousReading = decodeReading(db.prepare('SELECT captured_at, value_json, numeric_value, unit, source FROM readings WHERE series_id = ? AND captured_at < ? ORDER BY captured_at DESC LIMIT 1').get(id, from));
+  const nextReading = decodeReading(db.prepare('SELECT captured_at, value_json, numeric_value, unit, source FROM readings WHERE series_id = ? AND captured_at >= ? ORDER BY captured_at ASC LIMIT 1').get(id, to));
   const readingCount = db.prepare('SELECT COUNT(*) AS count FROM readings WHERE series_id = ?').get(id).count;
-  res.json({ series, from, to: now(), readings, readingCount });
+  res.json({ series, from, to, readings, previousReading, nextReading, readingCount });
 });
 
 app.listen(process.env.PORT || 3090, () => { console.log(`Histórico Zigbee en http://localhost:${process.env.PORT || 3090}`); gateway.start(); });
