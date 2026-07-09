@@ -46,6 +46,7 @@ const explorerDialog = () => $('#history-explorer');
 const explorerChart = () => $('#history-explorer-chart');
 const explorerDate = () => $('#history-explorer-date');
 const explorerNotice = () => $('#history-explorer-notice');
+const explorerTooltip = () => $('#history-explorer-tooltip');
 
 function localDateValue(date) { return `${date.getFullYear()}-${String(date.getMonth() + 1).padStart(2, '0')}-${String(date.getDate()).padStart(2, '0')}`; }
 function localDayBounds(date = new Date()) {
@@ -65,7 +66,19 @@ function explorerYRange(readings) {
 }
 function explorerDateLabel(time) { return new Intl.DateTimeFormat('es-ES', { day: '2-digit', month: 'short', hour: '2-digit', minute: '2-digit' }).format(time); }
 function explorerTimeLabel(time, span) { return new Intl.DateTimeFormat('es-ES', span <= 36 * 3_600_000 ? { hour: '2-digit', minute: '2-digit' } : { day: '2-digit', month: 'short' }).format(time); }
+function explorerExactDate(time) { return new Intl.DateTimeFormat('es-ES', { day: '2-digit', month: '2-digit', year: 'numeric', hour: '2-digit', minute: '2-digit', second: '2-digit', fractionalSecondDigits: 3 }).format(time); }
 function setExplorerNotice(message = '', error = false) { const node = explorerNotice(); node.textContent = message; node.classList.toggle('error', error); }
+function hideExplorerTooltip() { explorerTooltip().hidden = true; }
+function showExplorerTooltip(target, event) {
+  const tooltip = explorerTooltip(); const wrap = target.closest('.explorer-chart-wrap');
+  const value = target.dataset.readingValue; const unit = target.dataset.readingUnit;
+  tooltip.textContent = `${value}${unit ? ` ${unit}` : ''} · ${explorerExactDate(Number(target.dataset.readingTime))}`;
+  tooltip.hidden = false;
+  const bounds = wrap.getBoundingClientRect();
+  const left = Math.min(wrap.clientWidth - tooltip.offsetWidth - 10, Math.max(10, event.clientX - bounds.left + 14));
+  const top = Math.min(wrap.clientHeight - tooltip.offsetHeight - 10, Math.max(10, event.clientY - bounds.top + 14));
+  tooltip.style.left = `${left}px`; tooltip.style.top = `${top}px`;
+}
 function mergeExplorerReadings(readings) {
   for (const reading of readings) explorer.readings.set(`${reading.captured_at}:${reading.numeric_value}`, reading);
 }
@@ -100,6 +113,7 @@ function explorerCoordinates(point, view = explorer.view) {
 }
 function renderExplorer() {
   if (!explorer.view) return;
+  hideExplorerTooltip();
   const chart = explorerChart(); const view = explorer.view; const readings = explorerReadingsIn(view);
   const allReadings = explorerNumericReadings();
   const inTimeRange = allReadings.filter(reading => reading.captured_at >= view.from && reading.captured_at <= view.to);
@@ -117,7 +131,7 @@ function renderExplorer() {
     return `<line class="explorer-grid" x1="${explorerPlot.left}" y1="${yPos}" x2="${explorerPlot.left + explorerPlot.width}" y2="${yPos}"/><text class="explorer-axis" x="68" y="${yPos + 4}" text-anchor="end">${value.toFixed(2)}</text>`;
   }).join('');
   const points = lineReadings.map(reading => `${x(reading.captured_at).toFixed(2)},${y(reading.numeric_value).toFixed(2)}`).join(' ');
-  const dots = readings.length < 160 ? readings.map(reading => `<circle class="explorer-dot" cx="${x(reading.captured_at).toFixed(2)}" cy="${y(reading.numeric_value).toFixed(2)}" r="3.5"/>`).join('') : '';
+  const dots = readings.length < 160 ? readings.map(reading => `<circle class="explorer-dot" cx="${x(reading.captured_at).toFixed(2)}" cy="${y(reading.numeric_value).toFixed(2)}" r="3.5" data-reading-time="${reading.captured_at}" data-reading-value="${escapeHtml(String(reading.value ?? reading.numeric_value))}" data-reading-unit="${escapeHtml(reading.unit || explorer.active?.unit || '')}"/>`).join('') : '';
   const selection = explorer.selection ? `<rect class="explorer-selection" x="${Math.min(explorer.selection.start.x, explorer.selection.current.x)}" y="${Math.min(explorer.selection.start.y, explorer.selection.current.y)}" width="${Math.abs(explorer.selection.current.x - explorer.selection.start.x)}" height="${Math.abs(explorer.selection.current.y - explorer.selection.start.y)}"/>` : '';
   const empty = readings.length ? '' : '<text class="explorer-empty" x="524" y="280" text-anchor="middle">No hay valores numéricos en esta vista</text>';
   chart.innerHTML = `<defs><clipPath id="history-explorer-clip"><rect x="${explorerPlot.left}" y="${explorerPlot.top}" width="${explorerPlot.width}" height="${explorerPlot.height}"/></clipPath></defs>${verticalGrid}${horizontalGrid}<rect class="explorer-frame" x="${explorerPlot.left}" y="${explorerPlot.top}" width="${explorerPlot.width}" height="${explorerPlot.height}"/><g clip-path="url(#history-explorer-clip)">${points ? `<polyline class="explorer-line" points="${points}"/>${dots}` : ''}${selection}</g>${empty}<text class="explorer-axis-title" x="${explorerPlot.left}" y="16">${escapeHtml(explorer.active?.unit || '')}</text>`;
@@ -183,6 +197,9 @@ function setupExplorer() {
   explorerDate().onchange = event => selectExplorerDate(event.target.value);
   dialog.addEventListener('close', () => { explorer.active = null; explorer.drag = null; explorer.selection = null; });
   chart.addEventListener('contextmenu', event => event.preventDefault());
+  chart.addEventListener('pointerover', event => { if (event.target.classList.contains('explorer-dot')) showExplorerTooltip(event.target, event); });
+  chart.addEventListener('pointermove', event => { if (event.target.classList.contains('explorer-dot')) showExplorerTooltip(event.target, event); });
+  chart.addEventListener('pointerout', event => { if (event.target.classList.contains('explorer-dot')) hideExplorerTooltip(); });
   chart.addEventListener('pointerdown', event => {
     if (!explorer.view || (event.button !== 0 && event.button !== 2)) return;
     event.preventDefault(); chart.setPointerCapture(event.pointerId);
