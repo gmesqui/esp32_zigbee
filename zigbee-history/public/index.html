@@ -1,0 +1,31 @@
+<!doctype html>
+<html lang="es">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Histórico Zigbee</title>
+  <link rel="stylesheet" href="/styles.css">
+</head>
+<body>
+  <header>
+    <div><p class="eyebrow">ESP32 · ZIGBEE</p><h1>Histórico de sensores</h1></div>
+    <div id="connection" class="connection">Comprobando conexión…</div>
+  </header>
+  <main>
+    <section class="intro"><div><h2>Registra sólo lo que importa</h2><p>Selecciona las lecturas que quieres conservar. Cada cambio publicado por el puente se guarda localmente y queda disponible para comparar su evolución.</p></div><div class="data-note">Base de datos local<br><strong>SQLite</strong></div></section>
+    <section class="panel"><div class="section-title"><div><p class="eyebrow">1 · CONEXIÓN</p><h2>Puente Zigbee</h2></div><span id="last-message" class="muted"></span></div>
+      <form id="settings-form" class="settings"><label>URL WebSocket<input id="gateway-url" required placeholder="ws://esp32-zigbee.local:8080/ws"></label><button>Guardar y conectar</button></form>
+      <p id="settings-message" class="form-message"></p>
+    </section>
+    <section class="panel"><div class="section-title"><div><p class="eyebrow">2 · SERIES</p><h2>Elegir lecturas a conservar</h2></div><span id="device-count" class="muted"></span></div>
+      <form id="series-form" class="series-form"><label>Dispositivo<select id="device-select" required><option value="">Esperando inventario…</option></select></label><label>Atributo<select id="metric-select" required><option value="">Selecciona un dispositivo</option></select></label><label>Nombre en la gráfica<input id="label-input" required placeholder="Temperatura salón"></label><button>Empezar a guardar</button></form>
+      <p class="help">Los atributos aparecen cuando el puente ha recibido una lectura o ha enviado su estado inicial.</p>
+    </section>
+    <section><div class="section-title"><div><p class="eyebrow">3 · HISTORIAL</p><h2>Series configuradas</h2></div><label class="range">Periodo<select id="hours-select"><option value="6">6 horas</option><option value="24" selected>24 horas</option><option value="168">7 días</option><option value="720">30 días</option></select></label></div>
+      <div id="series-list" class="series-list"><div class="empty">Aún no hay series configuradas.</div></div>
+    </section>
+  </main>
+  <template id="series-template"><article class="series-card"><div class="card-head"><div><h3></h3><p class="device-name"></p></div><div class="card-actions"><button class="toggle secondary"></button><button class="remove danger">Eliminar</button></div></div><div class="reading"><strong class="last-value">—</strong><span class="unit"></span><span class="reading-time"></span></div><div class="chart-wrap"><svg class="chart" viewBox="0 0 800 250" preserveAspectRatio="none" aria-label="Gráfica histórica"></svg></div><footer><span class="reading-count"></span><span class="chart-note"></span></footer></article></template>
+  <script type="module" src="/app.js"></script>
+</body>
+</html>
