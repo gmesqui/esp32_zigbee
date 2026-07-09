@@ -1,5 +1,0 @@
-Mejorar esp32_zigbee/bridge/info
-Resolver publicacion robusta de esp32_zigbee/bridge/devices cuando no cabe el JSON completo
-Temporalmente: si bridge/devices excede el buffer actual, no se publica para evitar retenidos truncados
-Ampliar esp32_zigbee/<nombre>/get a mas atributos y lecturas agrupadas
-Revisar expose/options publicadas para no anunciar escrituras no soportadas

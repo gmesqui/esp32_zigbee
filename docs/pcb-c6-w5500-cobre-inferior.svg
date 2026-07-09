@@ -1,0 +1,128 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<svg xmlns="http://www.w3.org/2000/svg" width="85mm" height="52mm" viewBox="0 0 85 52">
+  <title>ESP32-C6 Super Mini + W5500 Lite - cobre inferior simple cara</title>
+  <desc>
+    Cobre inferior a escala 1:1. Las formas negras son cobre. Los circulos
+    blancos son taladros. Las lineas rojas discontinuas son puentes de hilo,
+    no cobre.
+  </desc>
+  <defs>
+    <style>
+      .outline { fill: none; stroke: #777; stroke-width: 0.18; stroke-dasharray: 1 1; }
+      .copper { fill: none; stroke: #000; stroke-linecap: round; stroke-linejoin: round; }
+      .pad { fill: #000; stroke: none; }
+      .hole { fill: #fff; stroke: none; }
+      .bridge { fill: none; stroke: #d00000; stroke-width: 0.45; stroke-linecap: round; stroke-linejoin: round; stroke-dasharray: 1.6 1.1; }
+      .cut { fill: none; stroke: #000; stroke-width: 0.20; }
+      .label { font-family: Arial, sans-serif; font-size: 1.65px; fill: #444; }
+      .label-small { font-family: Arial, sans-serif; font-size: 1.35px; fill: #666; }
+      .bridge-label { font-family: Arial, sans-serif; font-size: 1.45px; fill: #d00000; }
+    </style>
+    <g id="round-pad">
+      <circle class="pad" r="1.18"/>
+      <circle class="hole" r="0.45"/>
+    </g>
+  </defs>
+
+  <!-- Borde de placa y referencias mecanicas. No son cobre. -->
+  <rect class="cut" x="0.4" y="0.4" width="84.2" height="51.2" rx="0.8"/>
+  <rect class="outline" x="7" y="6" width="32" height="39"/>
+  <rect class="outline" x="47" y="5" width="30" height="42"/>
+  <text class="label" x="11" y="4.3">W5500 Lite</text>
+  <text class="label" x="52" y="4.3">ESP32-C6 Super Mini</text>
+  <text class="label-small" x="30" y="50">CARA DE COBRE INFERIOR - escala 1:1</text>
+
+  <!-- Pistas de alimentacion y GND. -->
+  <path class="copper" stroke-width="1.00"
+        d="M 52 15.08 L 43 15.08 L 43 7.2 L 13 7.2 L 13 15.54"/>
+  <path class="copper" stroke-width="1.00"
+        d="M 13 15.54 L 13 18.08"/>
+  <path class="copper" stroke-width="1.10"
+        d="M 52 12.54 L 33 12.54 L 33 13.00"/>
+  <path class="copper" stroke-width="1.10"
+        d="M 33 13.00 L 13 13.00"/>
+
+  <!-- Pistas de senal en cobre inferior. -->
+  <!-- MOSI: GPIO2 -> MO -->
+  <path class="copper" stroke-width="0.42"
+        d="M 33 18.08 L 43 18.08 L 43 27.78 L 52 27.78"/>
+  <!-- SCLK: GPIO6 -> SCK -->
+  <path class="copper" stroke-width="0.42"
+        d="M 33 20.62 L 39 20.62 L 39 37.94 L 52 37.94"/>
+  <!-- CS: GPIO7 -> CS -->
+  <path class="copper" stroke-width="0.42"
+        d="M 33 23.16 L 36 23.16 L 36 43.50 L 52 43.50 L 52 40.48"/>
+  <!-- RST: GPIO14 -> RST, por borde inferior -->
+  <path class="copper" stroke-width="0.36"
+        d="M 13 23.16 L 8.2 23.16 L 8.2 47.2 L 72 47.2 L 72 30.32"/>
+
+  <!-- Puentes de hilo por la cara superior. No son cobre. -->
+  <path class="bridge" d="M 13 25.70 C 27 33, 39 33, 52 30.32"/>
+  <text class="bridge-label" x="26" y="34.9">JP1 MISO</text>
+  <path class="bridge" d="M 33 25.70 C 46 22, 59 22, 72 25.24"/>
+  <text class="bridge-label" x="48" y="20.6">JP2 INT</text>
+
+  <!-- Pads W5500: fila exterior. -->
+  <use href="#round-pad" x="13" y="13.00"/>
+  <use href="#round-pad" x="13" y="15.54"/>
+  <use href="#round-pad" x="13" y="18.08"/>
+  <use href="#round-pad" x="13" y="20.62"/>
+  <use href="#round-pad" x="13" y="23.16"/>
+  <use href="#round-pad" x="13" y="25.70"/>
+
+  <!-- Pads W5500: fila interior hacia el C6. -->
+  <use href="#round-pad" x="33" y="13.00"/>
+  <use href="#round-pad" x="33" y="15.54"/>
+  <use href="#round-pad" x="33" y="18.08"/>
+  <use href="#round-pad" x="33" y="20.62"/>
+  <use href="#round-pad" x="33" y="23.16"/>
+  <use href="#round-pad" x="33" y="25.70"/>
+
+  <!-- Pads ESP32-C6: fila interior hacia el W5500. -->
+  <use href="#round-pad" x="52" y="10.00"/>
+  <use href="#round-pad" x="52" y="12.54"/>
+  <use href="#round-pad" x="52" y="15.08"/>
+  <use href="#round-pad" x="52" y="17.62"/>
+  <use href="#round-pad" x="52" y="20.16"/>
+  <use href="#round-pad" x="52" y="22.70"/>
+  <use href="#round-pad" x="52" y="25.24"/>
+  <use href="#round-pad" x="52" y="27.78"/>
+  <use href="#round-pad" x="52" y="30.32"/>
+  <use href="#round-pad" x="52" y="32.86"/>
+  <use href="#round-pad" x="52" y="35.40"/>
+  <use href="#round-pad" x="52" y="37.94"/>
+  <use href="#round-pad" x="52" y="40.48"/>
+
+  <!-- Pads ESP32-C6: fila exterior. -->
+  <use href="#round-pad" x="72" y="10.00"/>
+  <use href="#round-pad" x="72" y="12.54"/>
+  <use href="#round-pad" x="72" y="15.08"/>
+  <use href="#round-pad" x="72" y="17.62"/>
+  <use href="#round-pad" x="72" y="20.16"/>
+  <use href="#round-pad" x="72" y="22.70"/>
+  <use href="#round-pad" x="72" y="25.24"/>
+  <use href="#round-pad" x="72" y="27.78"/>
+  <use href="#round-pad" x="72" y="30.32"/>
+  <use href="#round-pad" x="72" y="32.86"/>
+  <use href="#round-pad" x="72" y="35.40"/>
+  <use href="#round-pad" x="72" y="37.94"/>
+  <use href="#round-pad" x="72" y="40.48"/>
+
+  <!-- Etiquetas no-cobre para validar montaje. -->
+  <text class="label-small" x="8.5" y="12.4">G</text>
+  <text class="label-small" x="8.5" y="14.95">V</text>
+  <text class="label-small" x="8.5" y="17.5">V</text>
+  <text class="label-small" x="8.2" y="22.6">RST</text>
+  <text class="label-small" x="8.5" y="25.1">MI</text>
+  <text class="label-small" x="34.7" y="17.5">MO</text>
+  <text class="label-small" x="34.7" y="20.05">SCK</text>
+  <text class="label-small" x="34.7" y="22.6">CS</text>
+  <text class="label-small" x="34.7" y="25.1">INT</text>
+  <text class="label-small" x="53.8" y="14.6">3V3</text>
+  <text class="label-small" x="53.8" y="27.2">GPIO2</text>
+  <text class="label-small" x="53.8" y="29.75">GPIO3</text>
+  <text class="label-small" x="53.8" y="37.35">GPIO6</text>
+  <text class="label-small" x="53.8" y="39.9">GPIO7</text>
+  <text class="label-small" x="73.8" y="24.65">GPIO18</text>
+  <text class="label-small" x="73.8" y="29.75">GPIO14</text>
+</svg>
