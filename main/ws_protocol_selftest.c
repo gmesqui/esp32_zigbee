@@ -192,7 +192,8 @@ static void test_inventory_fragmentation(ws_protocol_selftest_result_t *result,
     ok = ws_protocol_send_state_stream(capture_send, &cap);
     ok = ok && cap.state_chunks >= 1 &&
          cap.max_len < WS_PROTOCOL_MAX_MESSAGE &&
-         contains(cap.last, "\"final\":true");
+         contains(cap.last, "\"final\":true") &&
+         contains(cap.last, "\"max_report_interval_s\"");
     record_check(result, "state chunking", ok, verbose);
 
     if (opened_here) {

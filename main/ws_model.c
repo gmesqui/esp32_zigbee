@@ -1,5 +1,6 @@
 #include "ws_model.h"
 
+#include "report_config.h"
 #include "utils.h"
 #include "zcl_handler.h"
 #include <stdarg.h>
@@ -280,9 +281,12 @@ void ws_model_append_state_device(char **p, char *end,
     ws_json_append(p, end, "{");
     ws_json_append(p, end, "\"device_id\":");
     ws_model_append_device_id(p, end, dev->ieee_addr);
-    ws_json_append(p, end, ",\"meta\":{\"reachable\":%s,\"last_seen\":%lu",
+    ws_json_append(p, end,
+                   ",\"meta\":{\"reachable\":%s,\"last_seen\":%lu,"
+                   "\"max_report_interval_s\":%u",
                    dev->online ? "true" : "false",
-                   (unsigned long)last_seen);
+                   (unsigned long)last_seen,
+                   (unsigned)rc_effective_max_interval(dev->is_sleepy));
     if (dev->radio_metrics_valid) {
         ws_json_append(p, end, ",\"link_quality\":%u", dev->last_lqi);
     }
