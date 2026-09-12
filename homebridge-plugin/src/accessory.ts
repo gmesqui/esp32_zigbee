@@ -117,7 +117,14 @@ export class ZigbeeDeviceAccessory {
       return;
     }
 
-    this.accessory.displayName = this.device.name;
+    // Homebridge's PlatformAccessory helper updates both the wrapper and the
+    // underlying HAP accessory. The fallback keeps the lightweight HAP
+    // accessory used by older integrations/tests working as well.
+    if (typeof this.accessory.updateDisplayName === 'function') {
+      this.accessory.updateDisplayName(this.device.name);
+    } else {
+      this.accessory.displayName = this.device.name;
+    }
     this.accessory.context.device = this.device;
     this.ensureLastKnown(this.device.device_id);
 
@@ -230,8 +237,15 @@ export class ZigbeeDeviceAccessory {
       candidate.UUID === serviceCtor.UUID && candidate.subtype === subtype,
     );
 
-    return existing
-      ?? this.accessory.addService(serviceCtor as unknown as typeof Service, displayName, subtype);
+    if (!existing) {
+      return this.accessory.addService(serviceCtor as unknown as typeof Service, displayName, subtype);
+    }
+
+    // Cached services keep their original display name unless both the HAP
+    // service field and its Name characteristic are refreshed explicitly.
+    existing.displayName = displayName;
+    existing.setCharacteristic(this.platform.Characteristic.Name, displayName);
+    return existing;
   }
 
   private removeStaleServices(): void {

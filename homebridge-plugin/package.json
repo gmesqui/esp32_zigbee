@@ -1,6 +1,6 @@
 {
   "name": "homebridge-esp32-zigbee",
-  "version": "0.2.0",
+  "version": "0.2.1",
   "description": "Homebridge platform plugin for the ESP32 Zigbee WebSocket gateway",
   "license": "MIT",
   "main": "dist/index.js",

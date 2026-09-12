@@ -3,6 +3,7 @@ const test = require('node:test');
 const { once } = require('node:events');
 const { WebSocketServer } = require('ws');
 const hap = require('@homebridge/hap-nodejs');
+const { PlatformAccessory } = require('../node_modules/homebridge/dist/platformAccessory');
 
 const { GatewayClient } = require('../dist/client');
 const { Esp32ZigbeePlatform } = require('../dist/platform');
@@ -166,6 +167,68 @@ test('conserva los accesorios y aplica reachability y sensores del mismo evento'
   assert.equal(service.getCharacteristic(hap.Characteristic.CurrentTemperature).value, 21.5);
   assert.equal(accessory.context.lastKnown.meta.reachable, true);
   assert.equal(accessory.context.lastKnown.state.temperature.value, 21.5);
+  assert.ok(updated.length >= 2);
+  listeners.get('shutdown')();
+});
+
+test('sincroniza nombres de accesorio y servicios al restaurar y renombrar', () => {
+  const listeners = new Map();
+  const updated = [];
+  const api = {
+    hap,
+    platformAccessory: PlatformAccessory,
+    on(event, listener) {
+      listeners.set(event, listener);
+      return this;
+    },
+    registerPlatformAccessories() {},
+    unregisterPlatformAccessories() {},
+    updatePlatformAccessories(accessories) {
+      updated.push(...accessories);
+    },
+  };
+  const oldDevice = {
+    device_id: '0x00124b0000000002',
+    name: '0x00124b0000000002',
+    capabilities: ['switch', 'battery_sensor'],
+    power_source: 'battery',
+  };
+  const newDevice = { ...oldDevice, name: 'Lámpara salón' };
+  const accessory = new PlatformAccessory(oldDevice.name, hap.uuid.generate(oldDevice.device_id));
+  accessory.context = {
+    device: oldDevice,
+    lastKnown: { device_id: oldDevice.device_id, meta: {}, state: {} },
+  };
+  const uuid = accessory.UUID;
+  const platform = new Esp32ZigbeePlatform(logger(), { name: 'ESP32 Zigbee Bridge' }, api);
+
+  platform.configureAccessory(accessory);
+  platform.client.emit('connected');
+  platform.client.emit('inventory', [newDevice], 1);
+
+  const serviceIds = accessory.services.map(service => `${service.UUID}:${service.subtype ?? ''}`);
+  const switchService = accessory.getServiceById(hap.Service.Switch, 'switch');
+  const batteryService = accessory.getServiceById(hap.Service.Battery, 'battery');
+  assert.equal(accessory.UUID, uuid);
+  assert.equal(accessory.displayName, 'Lámpara salón');
+  assert.equal(accessory._associatedHAPAccessory.displayName, 'Lámpara salón');
+  assert.equal(switchService.displayName, 'Lámpara salón');
+  assert.equal(switchService.getCharacteristic(hap.Characteristic.Name).value, 'Lámpara salón');
+  assert.equal(batteryService.displayName, 'Lámpara salón Battery');
+  assert.equal(batteryService.getCharacteristic(hap.Characteristic.Name).value, 'Lámpara salón Battery');
+
+  platform.client.emit('event', 'device_updated', {
+    device_id: newDevice.device_id,
+    name: 'Luz salón',
+  });
+
+  assert.equal(accessory.displayName, 'Luz salón');
+  assert.equal(switchService.displayName, 'Luz salón');
+  assert.equal(switchService.getCharacteristic(hap.Characteristic.Name).value, 'Luz salón');
+  assert.equal(batteryService.displayName, 'Luz salón Battery');
+  assert.equal(batteryService.getCharacteristic(hap.Characteristic.Name).value, 'Luz salón Battery');
+  assert.deepEqual(accessory.services.map(service => `${service.UUID}:${service.subtype ?? ''}`), serviceIds);
+  assert.equal(accessory.context.device.name, 'Luz salón');
   assert.ok(updated.length >= 2);
   listeners.get('shutdown')();
 });
