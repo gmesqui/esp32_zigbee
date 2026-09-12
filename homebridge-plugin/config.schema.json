@@ -2,7 +2,7 @@
   "pluginAlias": "ESP32ZigbeeBridge",
   "pluginType": "platform",
   "singular": false,
-  "headerDisplay": "Plugin de Homebridge para el gateway Zigbee ESP32 por WebSocket. Descubre accesorios desde `inventory_chunk`, mantiene reachability y sensores con `event`, y hoy controla de forma nativa solo `on/off` porque el firmware actual no expone aun brillo u otras escrituras por WebSocket.",
+  "headerDisplay": "Plugin de Homebridge 2.4+ para el gateway Zigbee ESP32 por WebSocket. Descubre accesorios desde `inventory_chunk`, inicializa sus valores desde `state_chunk` y mantiene reachability y sensores con `event`. Hoy controla de forma nativa solo `on/off` porque el firmware no expone aún brillo u otras escrituras por WebSocket.",
   "schema": {
     "type": "object",
     "properties": {

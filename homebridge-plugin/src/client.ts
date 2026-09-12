@@ -95,10 +95,13 @@ export class GatewayClient extends EventEmitter {
     this.clearReconnectTimer();
     this.clearPingTimer();
     this.rejectAllPending('Gateway client stopped');
+    this.inventoryStream.clear();
+    this.stateStream.clear();
     this.socket?.removeAllListeners();
     this.socket?.close();
     this.socket = undefined;
     this.connected = false;
+    this.connecting = false;
   }
 
   public isConnected(): boolean {

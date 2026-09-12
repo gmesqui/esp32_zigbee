@@ -1,6 +1,6 @@
 {
   "name": "homebridge-esp32-zigbee",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "description": "Homebridge platform plugin for the ESP32 Zigbee WebSocket gateway",
   "license": "MIT",
   "main": "dist/index.js",
@@ -13,8 +13,8 @@
     "websocket"
   ],
   "engines": {
-    "node": ">=18.20.4",
-    "homebridge": "^1.8.0"
+    "node": "^24.15.0",
+    "homebridge": "^2.4.0"
   },
   "files": [
     "dist",
@@ -24,10 +24,11 @@
   "scripts": {
     "build": "tsc -p tsconfig.json",
     "watch": "tsc -p tsconfig.json --watch",
-    "prepare": "npm run build"
+    "prepare": "npm run build",
+    "test": "npm run build && node --test test/*.test.js"
   },
   "peerDependencies": {
-    "homebridge": "^1.8.0"
+    "homebridge": "^2.4.0"
   },
   "dependencies": {
     "multicast-dns": "^7.2.5",
@@ -36,7 +37,7 @@
   "devDependencies": {
     "@types/node": "^24.0.0",
     "@types/ws": "^8.5.14",
-    "homebridge": "^1.8.5",
+    "homebridge": "^2.4.0",
     "typescript": "^5.8.3"
   }
 }

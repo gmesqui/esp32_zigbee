@@ -58,6 +58,14 @@ export class Esp32ZigbeePlatform implements DynamicPlatformPlugin {
       this.log.info(`Inicializando plataforma ${PLATFORM_NAME} hacia ${url}`);
       this.client.start();
     });
+
+    this.api.on('shutdown', () => {
+      if (this.resyncTimer) {
+        clearTimeout(this.resyncTimer);
+        this.resyncTimer = undefined;
+      }
+      this.client.stop();
+    });
   }
 
   public configureAccessory(accessory: ZigbeePlatformAccessory): void {
@@ -197,17 +205,16 @@ export class Esp32ZigbeePlatform implements DynamicPlatformPlugin {
     const key = deviceKey(payload.device_id);
     const accessory = this.accessories.get(key);
 
-    if (messageType === 'event' && payload.changes?.reachable && accessory) {
-      accessory.applyReachability({
-        reachable: Boolean(payload.changes.reachable.value),
-      });
-      accessory.setGatewayAvailable(this.gatewayAvailable);
-      this.api.updatePlatformAccessories([accessory.accessory]);
-      return;
-    }
-
     if (messageType === 'event' && payload.changes && accessory) {
-      accessory.applyEventChanges(payload.changes);
+      const { reachable, ...stateChanges } = payload.changes;
+      if (reachable) {
+        accessory.applyReachability({
+          reachable: Boolean(reachable.value),
+        });
+      }
+      if (Object.keys(stateChanges).length > 0) {
+        accessory.applyEventChanges(stateChanges);
+      }
       accessory.setGatewayAvailable(this.gatewayAvailable);
       this.api.updatePlatformAccessories([accessory.accessory]);
       return;

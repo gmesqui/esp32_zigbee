@@ -25,7 +25,7 @@ Capacidades ya cubiertas:
 
 Limitaciones importantes del firmware actual:
 
-- `state_chunk` todavía llega con `state: {}` vacío, así que el plugin arranca apoyándose en caché y en eventos posteriores
+- `state_chunk` contiene los atributos que el gateway tenga en caché; si un dispositivo aún no ha reportado una capacidad, el plugin conserva su último valor y se actualiza con los eventos posteriores
 - por WebSocket hoy solo está implementado el comando `set` sobre `cluster: "onoff"`
 - capacidades como `brightness`, `pressure_sensor` o `power_sensor` todavía no tienen traducción HomeKit o no son escribibles por este protocolo
 
@@ -90,6 +90,5 @@ otro servicio principal.
 
 ## Siguientes pasos recomendados
 
-- completar `state_chunk` en el firmware para que Homebridge arranque con snapshot real
 - exponer `brightness` y otros comandos en `cmd`
 - decidir cómo publicar `pressure_sensor` y `power_sensor` en HomeKit
