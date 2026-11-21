@@ -31,12 +31,12 @@ bool nvs_cache_load(void);
 // Save all dirty devices to NVS. Call periodically (e.g. every 10 s).
 // Only writes entries whose dirty flag is set; clears the flag after write.
 // ---------------------------------------------------------------------------
-void nvs_cache_save_dirty(void);
+bool nvs_cache_save_dirty(void);
 
 // ---------------------------------------------------------------------------
 // Force-save a single device immediately (e.g. after interview completes).
 // ---------------------------------------------------------------------------
-void nvs_cache_save_device(uint8_t slot_idx);
+bool nvs_cache_save_device(uint8_t slot_idx);
 
 // ---------------------------------------------------------------------------
 // Remove a single device slot from NVS and refresh the cache header.

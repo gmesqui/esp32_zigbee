@@ -2,6 +2,8 @@
 
 Coordinador Zigbee completo para `ESP32-C5-KITC-A V1.2` y `ESP32-C6 Super Mini` con `ESP-IDF` y `ESP Zigbee SDK`.
 
+Todo dispositivo con microcontrolador del proyecto debe admitir actualizaciones por su red de comunicaciones. La conexión física al ordenador queda como último recurso. El estado de los firmwares existentes y los criterios de aceptación se recogen en el [plan de actualización por red](PLAN.md).
+
 ## Hardware soportado
 
 | Placa | Target ESP-IDF | Radio | Flash | LED RGB | Boton permit-join |
@@ -19,7 +21,9 @@ Coordinador Zigbee completo para `ESP32-C5-KITC-A V1.2` y `ESP32-C6 Super Mini` 
 
 El transporte operativo para clientes externos es WebSocket sobre ESP-IDF:
 
-- URL: `ws://<gateway>:8080/ws`
+- Nombre mDNS del coordinador: `esp32-zigbee.local`
+- Panel web: `http://esp32-zigbee.local:8080/`
+- URL: `ws://esp32-zigbee.local:8080/ws`
 - Modulo servidor: `ws_transport.c/h`
 - Protocolo y parsing: `ws_protocol.c/h`
 - Adaptacion del modelo interno: `ws_model.c/h`
@@ -331,7 +335,9 @@ nvs,        data, nvs,     0x9000,   0x20000    # 128 KiB — NVS (cache + stack
 phy_init,   data, phy,     0x29000,  0x1000     #   4 KiB — calibracion PHY
 zb_storage, data, fat,     0x2A000,  0x10000    #  64 KiB — almacenamiento persistente Zigbee
 zb_fct,     data, fat,     0x3A000,  0x1000     #   4 KiB — factory data Zigbee
-factory,    app,  factory, 0x40000,  0x3C0000   # 3.75 MiB — firmware
+otadata,    data, ota,     0x3C000,  0x2000
+ota_0,      app,  ota_0,   0x40000,  0x1E0000
+ota_1,      app,  ota_1,   0x220000, 0x1E0000
 ```
 
 > Si cambias los offsets de `zb_storage` / `zb_fct`, hay que flashear la tabla de particiones y puede ser necesario volver a formar la red.
@@ -339,6 +345,10 @@ factory,    app,  factory, 0x40000,  0x3C0000   # 3.75 MiB — firmware
 ---
 
 ## Activar entorno ESP-IDF
+
+Para macOS, consulta [Entorno de desarrollo en macOS](docs/entorno-macos.md),
+con las herramientas instaladas, la activación del entorno y los comandos para
+compilar ambas placas y ejecutar las aplicaciones del proyecto.
 
 En PowerShell:
 
@@ -363,6 +373,10 @@ idf.py build
 ```
 
 `sdkconfig.defaults` contiene la configuracion comun, y `sdkconfig.defaults.esp32c5` / `sdkconfig.defaults.esp32c6` contienen los ajustes especificos de cada target.
+
+## Actualizar por Ethernet
+
+El coordinador C5 y el C6 admiten imágenes de aplicación firmadas sobre Ethernet. Para la migración de una unidad ya emparejada, la actualización ordinaria y la comprobación de dispositivos, sigue la [guía OTA](docs/ota-ethernet.md).
 
 ## Flashear y monitorizar
 

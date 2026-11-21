@@ -850,7 +850,7 @@ class _SimulatorScreenState extends State<SimulatorScreen> {
                   controller: _hostController,
                   enabled: !_connected && !_connecting,
                   decoration: const InputDecoration(
-                    labelText: 'Nombre mDNS o IP',
+                    labelText: 'Nombre mDNS',
                     prefixIcon: Icon(Icons.dns_outlined),
                   ),
                 ),

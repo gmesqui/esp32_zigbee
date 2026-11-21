@@ -341,23 +341,23 @@ bool nvs_cache_load(void)
     return loaded > 0;
 }
 
-void nvs_cache_save_device(uint8_t idx)
+bool nvs_cache_save_device(uint8_t idx)
 {
     device_record_t *d = dm_get_by_index(idx);
-    if (!d) return;
+    if (!d) return false;
 
     nvs_handle_t handle;
     esp_err_t err = nvs_open(NVS_NAMESPACE, NVS_READWRITE, &handle);
     if (err != ESP_OK) {
         ZB_LOG("NVS cache: open for write failed (%d)", err);
-        return;
+        return false;
     }
 
     bool needs_commit = false;
     bool device_written = false;
     bool header_changed = false;
-    bool header_error = false;
     size_t len = serialise(idx);
+    bool write_failed = len == 0;
     if (len > 0) {
         char key[16];
         make_key(idx, key, sizeof(key));
@@ -367,6 +367,7 @@ void nvs_cache_save_device(uint8_t idx)
                 needs_commit = true;
                 device_written = true;
             } else {
+                write_failed = true;
                 ZB_LOG("NVS cache: write error for slot %u (%d)", idx, err);
             }
         }
@@ -376,7 +377,7 @@ void nvs_cache_save_device(uint8_t idx)
     err = write_head_if_changed(handle, &header_changed);
     if (err != ESP_OK) {
         ZB_LOG("NVS cache: header update failed (%d)", err);
-        header_error = true;
+        write_failed = true;
     } else if (header_changed) {
         needs_commit = true;
     }
@@ -384,7 +385,7 @@ void nvs_cache_save_device(uint8_t idx)
     if (needs_commit) {
         err = nvs_commit(handle);
         if (err == ESP_OK) {
-            d->dirty = header_error;
+            d->dirty = write_failed;
             if (!device_written && header_changed) {
                 ZB_LOG("NVS cache: header updated");
             }
@@ -392,10 +393,11 @@ void nvs_cache_save_device(uint8_t idx)
             d->dirty = true;
             ZB_LOG("NVS cache: commit failed for slot %u (%d)", idx, err);
         }
-    } else if (!header_error) {
-        d->dirty = false;
+    } else {
+        d->dirty = write_failed;
     }
     nvs_close(handle);
+    return !d->dirty;
 }
 
 void nvs_cache_delete_device(uint8_t idx)
@@ -436,19 +438,21 @@ void nvs_cache_delete_device(uint8_t idx)
     nvs_close(handle);
 }
 
-void nvs_cache_save_dirty(void)
+bool nvs_cache_save_dirty(void)
 {
+    bool saved = true;
     bool any = false;
     for (int i = 0; i < MAX_DEVICES; i++) {
         device_record_t *d = dm_get_by_index(i);
         if (d && d->dirty) {
-            nvs_cache_save_device((uint8_t)i);
+            if (!nvs_cache_save_device((uint8_t)i)) saved = false;
             any = true;
         }
     }
     if (any) {
-        ZB_LOG("NVS cache: dirty flush complete");
+        ZB_LOG("NVS cache: dirty flush %s", saved ? "complete" : "incomplete");
     }
+    return saved;
 }
 
 void nvs_cache_erase(void)

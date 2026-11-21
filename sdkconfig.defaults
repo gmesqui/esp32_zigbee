@@ -47,3 +47,7 @@ CONFIG_ETH_SPI_ETHERNET_W5500=y
 
 # WebSocket server transport
 CONFIG_HTTPD_WS_SUPPORT=y
+
+# Two application slots and a dedicated Ethernet upload server.
+CONFIG_BOOTLOADER_APP_ROLLBACK_ENABLE=y
+CONFIG_LWIP_MAX_SOCKETS=16

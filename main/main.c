@@ -1,6 +1,7 @@
 #include <stdio.h>
 #include "board_config.h"
 #include "nvs_flash.h"
+#include "coordinator_ota.h"
 #include "nvs.h"
 #include "utils.h"
 #include "app_config.h"
@@ -26,14 +27,9 @@
 void app_main(void)
 {
     // 1. Initialise NVS flash (required by Zigbee stack and our own cache)
-    esp_err_t err = nvs_flash_init();
-    if (err == ESP_ERR_NVS_NO_FREE_PAGES ||
-        err == ESP_ERR_NVS_NEW_VERSION_FOUND) {
-        // NVS partition was truncated or has incompatible schema — erase and retry
-        ESP_ERROR_CHECK(nvs_flash_erase());
-        err = nvs_flash_init();
-    }
-    ESP_ERROR_CHECK(err);
+    // Recovery must preserve NVS, even if a new release cannot read it.
+    ESP_ERROR_CHECK(nvs_flash_init());
+    coordinator_ota_init();
 
     ZB_LOG("=== %s Zigbee Coordinator booting (%s) ===", BOARD_SOC_NAME, BOARD_NAME);
     ZB_LOG("Build: " __DATE__ " " __TIME__);

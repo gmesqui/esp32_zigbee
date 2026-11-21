@@ -15,7 +15,7 @@ Use this checklist to validate the ESP32 WebSocket transport without Homebridge.
 1. Connect a generic client to:
 
    ```text
-   ws://<gateway-ip>:8080/ws
+   ws://esp32-zigbee.local:8080/ws
    ```
 
 2. Confirm the ESP32 logs:

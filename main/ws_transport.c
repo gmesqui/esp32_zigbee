@@ -1,4 +1,5 @@
 #include "ws_transport.h"
+#include "coordinator_ota.h"
 
 #include "app_config.h"
 #include "button_handler.h"
@@ -2671,6 +2672,9 @@ static void ws_task(void *arg)
         vTaskDelete(NULL);
         return;
     }
+
+    esp_err_t ota_err = coordinator_ota_start_server();
+    if (ota_err != ESP_OK) ZB_LOG("Ethernet OTA server failed: %s", esp_err_to_name(ota_err));
 
     ZB_LOG("WS server listening on ws://<gateway>:%u%s",
            WS_HTTP_PORT, WS_URI);

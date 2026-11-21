@@ -23,6 +23,6 @@ cd tools\homebridge_simulator
 flutter run -d web-server --web-hostname 127.0.0.1 --web-port 8088
 ```
 
-La pantalla permite conectar/desconectar, cambiar el nombre mDNS o IP,
+La pantalla permite conectar/desconectar, cambiar el nombre mDNS,
 ver mensajes RX/TX y preparar JSON manualmente o desde plantillas `hello`,
 `ping`, `resync` y `cmd` on/off.

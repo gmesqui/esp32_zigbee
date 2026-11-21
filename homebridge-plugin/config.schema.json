@@ -18,7 +18,7 @@
         "placeholder": "ws://esp32-zigbee.local:8080/ws"
       },
       "host": {
-        "title": "Host o mDNS",
+        "title": "Nombre mDNS",
         "type": "string",
         "placeholder": "esp32-zigbee.local"
       },

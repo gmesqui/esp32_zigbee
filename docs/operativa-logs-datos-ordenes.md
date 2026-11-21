@@ -4,7 +4,7 @@ Objetivo: recuperar logs en tiempo real, consultar datos de dispositivos y lanza
 
 Gateway usado en las pruebas: `esp32-zigbee.local`.
 
-IP observada en la ultima prueba: `192.168.1.156`.
+Usar `esp32-zigbee.local` en las conexiones, los comandos y la configuracion de los clientes.
 
 ## Interfaz web y API
 
@@ -42,12 +42,6 @@ Conexion interactiva rapida:
 
 ```powershell
 ncat esp32-zigbee.local 2323
-```
-
-Si no resuelve mDNS:
-
-```powershell
-ncat 192.168.1.156 2323
 ```
 
 Captura a fichero con PowerShell:

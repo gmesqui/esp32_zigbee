@@ -122,12 +122,15 @@ static void test_session_lifecycle(ws_protocol_selftest_result_t *result,
 
     ws_client_session_snapshot_t snapshot = {0};
     ws_client_session_snapshot(&snapshot);
+    // Message IDs are global and continue across sessions and self-test runs.
+    uint32_t first_msg_id = ws_client_session_next_msg_id();
+    uint32_t second_msg_id = ws_client_session_next_msg_id();
+    uint32_t expected_next_id = first_msg_id == UINT32_MAX ? 1 : first_msg_id + 1;
     bool ok = opened &&
               snapshot.active &&
               snapshot.sockfd == test_fd &&
               ws_client_session_matches(test_fd) &&
-              ws_client_session_next_msg_id() == 1 &&
-              ws_client_session_next_msg_id() == 2;
+              first_msg_id != 0 && second_msg_id == expected_next_id;
 
     bool closed = ws_client_session_close(test_fd);
     ok = ok && closed && !ws_client_session_is_active();

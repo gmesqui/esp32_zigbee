@@ -1,4 +1,5 @@
 #include "zigbee_core.h"
+#include "coordinator_ota.h"
 #include "zb_events.h"
 #include "device_manager.h"
 #include "device_interview.h"
@@ -25,6 +26,7 @@
 #include "aps/esp_zigbee_aps.h"
 #include "platform/esp_zigbee_platform.h"
 #include "esp_check.h"
+#include "esp_partition.h"
 #include "esp_timer.h"
 
 // ---------------------------------------------------------------------------
@@ -64,6 +66,7 @@
 #define ZCL_CMD_DEFAULT_RSP             0x0Bu
 #define ZCL_CMD_DISCOVER_ATTR           0x0Cu
 
+static bool storage_was_blank;
 static volatile bool s_network_ready = false;
 static bool s_time_attr_refresh_started = false;
 
@@ -685,14 +688,13 @@ void esp_zb_app_signal_handler(esp_zb_app_signal_t *signal_struct)
             break;
 
         case ESP_ZB_BDB_SIGNAL_DEVICE_FIRST_START:
-            if (err == ESP_OK) {
+            if (err == ESP_OK && esp_zb_bdb_is_factory_new() &&
+                !coordinator_ota_trial_boot() && storage_was_blank && dm_count() == 0) {
                 ZB_LOG("SIGNAL FIRST_START — forming new network");
                 esp_zb_bdb_start_top_level_commissioning(
                     ESP_ZB_BDB_MODE_NETWORK_FORMATION);
             } else {
-                ZB_LOG("SIGNAL FIRST_START err=0x%X — retrying", err);
-                esp_zb_bdb_start_top_level_commissioning(
-                    ESP_ZB_BDB_MODE_NETWORK_FORMATION);
+                ZB_LOG("FIRST_START: preserving stored network; formation suppressed");
             }
             break;
 
@@ -714,7 +716,7 @@ void esp_zb_app_signal_handler(esp_zb_app_signal_t *signal_struct)
             break;
 
         case ESP_ZB_BDB_SIGNAL_DEVICE_REBOOT:
-            if (err == ESP_OK) {
+            if (err == ESP_OK && coordinator_ota_network_matches()) {
                 uint8_t  ch  = esp_zb_get_current_channel();
                 uint16_t pan = esp_zb_get_pan_id();
                 ZB_LOG("SIGNAL DEVICE_REBOOT — network restored channel=%u pan_id=0x%04X",
@@ -725,9 +727,7 @@ void esp_zb_app_signal_handler(esp_zb_app_signal_t *signal_struct)
                 start_time_attr_refresh();
                 di_startup_probe_known_devices();
             } else {
-                ZB_LOG("SIGNAL DEVICE_REBOOT err=0x%X — forming new network", err);
-                esp_zb_bdb_start_top_level_commissioning(
-                    ESP_ZB_BDB_MODE_NETWORK_FORMATION);
+                ZB_LOG("DEVICE_REBOOT: restore failed (0x%X); preserving stored network", err);
             }
             break;
 
@@ -1071,9 +1071,28 @@ static esp_err_t zb_action_handler(esp_zb_core_action_callback_id_t cb_id,
 // Stack initialisation
 // ---------------------------------------------------------------------------
 
+// Snapshot storage before the stack can initialise it. A migrated coordinator
+// with no devices in the application cache can still own a valid Zigbee PAN.
+static bool zigbee_storage_is_blank(void)
+{
+    const esp_partition_t *part = esp_partition_find_first(
+        ESP_PARTITION_TYPE_DATA, ESP_PARTITION_SUBTYPE_DATA_FAT, "zb_storage");
+    if (!part) return false;
+    uint8_t buf[256];
+    for (size_t offset = 0; offset < part->size; offset += sizeof(buf)) {
+        if (esp_partition_read(part, offset, buf, sizeof(buf)) != ESP_OK) return false;
+        for (size_t i = 0; i < sizeof(buf); i++) {
+            if (buf[i] != 0xff) return false;
+        }
+    }
+    return true;
+}
+
 static void esp_zb_task(void *arg)
 {
     (void)arg;
+
+    storage_was_blank = zigbee_storage_is_blank();
 
     // 1. Platform config (native radio, no host)
     esp_zb_platform_config_t platform_config = {

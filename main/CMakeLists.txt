@@ -1,6 +1,7 @@
 idf_component_register(
     SRCS
         "main.c"
+        "coordinator_ota.c"
         "app_config.c"
         "utils.c"
         "led_driver.c"
@@ -23,10 +24,14 @@ idf_component_register(
         "eth_driver.c"
         "time_sync.c"
         "tcp_console.c"
+    EMBED_TXTFILES "ota_public.pem"
     INCLUDE_DIRS "."
     REQUIRES
         nvs_flash
         app_update
+        mbedtls
+        esp_hw_support
+        bootloader_support
         driver
         esp_app_format
         esp_driver_usb_serial_jtag

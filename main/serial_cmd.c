@@ -495,6 +495,7 @@ void serial_cmd_init(void)
 {
     ESP_ERROR_CHECK(console_channel_init());
 
-    xTaskCreate(serial_cmd_task, "serial_cmd_task", 4096, NULL, 3, NULL);
+    // Protocol self-tests nest 1 KiB capture/message buffers and float formatting.
+    xTaskCreate(serial_cmd_task, "serial_cmd_task", 8192, NULL, 3, NULL);
     ZB_LOG("Serial command handler init OK on %s", console_channel_name());
 }
